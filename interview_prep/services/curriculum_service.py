@@ -1,0 +1,702 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+from interview_prep.domain.models import (
+    CurriculumObjective,
+    CurriculumSubtopic,
+    CurriculumTopic,
+    Question,
+    QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+    Topic,
+)
+from interview_prep.domain.rules import normalize_difficulty
+from interview_prep.infra.llm import LLMClient
+from interview_prep.infra.repositories import SQLiteRepository
+
+
+@dataclass(frozen=True)
+class GeneratedQuestion:
+    difficulty: str
+    prompt: str
+    hint: str
+    reference_answer: str
+
+
+@dataclass(frozen=True)
+class GeneratedSubtopic:
+    slug: str
+    title: str
+    description: str
+    objectives: list[str]
+
+
+@dataclass(frozen=True)
+class GeneratedTopic:
+    slug: str
+    title: str
+    description: str
+    level: str
+    objectives: list[str]
+    subtopics: list[GeneratedSubtopic]
+    questions: list[GeneratedQuestion]
+    mock_scenarios: list[str]
+
+
+@dataclass(frozen=True)
+class GeneratedCurriculum:
+    topics: list[GeneratedTopic]
+
+
+@dataclass(frozen=True)
+class CurriculumImportResult:
+    topics_saved: int
+    questions_saved: int
+    curriculum: GeneratedCurriculum
+    curriculum_topics_saved: int = 0
+    subtopics_saved: int = 0
+    objectives_saved: int = 0
+
+
+@dataclass(frozen=True)
+class TopicRecommendation:
+    topic: Topic
+    curriculum_topic: CurriculumTopic | None
+    reason: str
+    answers: int
+    avg_self_score: float | None
+    last_answered_at: datetime | None
+
+
+@dataclass(frozen=True)
+class CurriculumTopicStatus:
+    curriculum_topic: CurriculumTopic
+    topic_title: str | None
+    subtopic_count: int
+    objective_count: int
+    question_count: int
+    empty_zones: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CurriculumStatus:
+    source: str
+    app_topic_count: int
+    curriculum_topic_count: int
+    subtopic_count: int
+    objective_count: int
+    question_count: int
+    empty_zones: tuple[str, ...]
+    topics: tuple[CurriculumTopicStatus, ...]
+
+
+class CurriculumService:
+    def __init__(self, repository: SQLiteRepository, llm: LLMClient):
+        self.repository = repository
+        self.llm = llm
+
+    def generate(self, topic_count: int = 3, questions_per_topic: int = 3) -> GeneratedCurriculum:
+        topic_count = max(1, min(topic_count, 12))
+        questions_per_topic = max(1, min(questions_per_topic, 10))
+        raw = self.llm.generate(build_curriculum_prompt(topic_count, questions_per_topic))
+        return parse_curriculum(raw, topic_count, questions_per_topic)
+
+    def generate_and_save(
+        self,
+        topic_count: int = 3,
+        questions_per_topic: int = 3,
+        dry_run: bool = False,
+    ) -> CurriculumImportResult:
+        curriculum = self.generate(topic_count, questions_per_topic)
+        if dry_run:
+            return CurriculumImportResult(0, 0, curriculum)
+
+        topics_saved = 0
+        questions_saved = 0
+        curriculum_topics_saved = 0
+        subtopics_saved = 0
+        objectives_saved = 0
+        for topic_index, generated_topic in enumerate(curriculum.topics):
+            topic = self.repository.upsert_topic(
+                Topic(
+                    id=None,
+                    slug=generated_topic.slug,
+                    title=generated_topic.title,
+                    description=generated_topic.description,
+                    level=generated_topic.level,
+                )
+            )
+            topics_saved += 1
+            existing_curriculum_topic = self.repository.find_curriculum_topic_by_slug_source(
+                generated_topic.slug,
+                "llm-seed",
+            )
+            saved_curriculum_topic = self.repository.add_curriculum_topic(
+                CurriculumTopic(
+                    id=None,
+                    topic_id=topic.id,
+                    slug=generated_topic.slug,
+                    title=generated_topic.title,
+                    description=generated_topic.description,
+                    level=generated_topic.level,
+                    source="llm-seed",
+                    order_index=topic_index + 1,
+                )
+            )
+            if existing_curriculum_topic is None:
+                curriculum_topics_saved += 1
+            curriculum_topic_id = saved_curriculum_topic.id or 0
+            for objective_index, objective in enumerate(generated_topic.objectives):
+                existing_objective = self.repository.find_curriculum_objective_by_text_source(
+                    curriculum_topic_id,
+                    None,
+                    objective,
+                    "llm-seed",
+                )
+                self.repository.add_curriculum_objective(
+                    CurriculumObjective(
+                        id=None,
+                        curriculum_topic_id=curriculum_topic_id,
+                        curriculum_subtopic_id=None,
+                        text=objective,
+                        source="llm-seed",
+                        order_index=objective_index + 1,
+                    )
+                )
+                if existing_objective is None:
+                    objectives_saved += 1
+            for subtopic_index, generated_subtopic in enumerate(generated_topic.subtopics):
+                existing_subtopic = self.repository.find_curriculum_subtopic_by_slug_source(
+                    curriculum_topic_id,
+                    generated_subtopic.slug,
+                    "llm-seed",
+                )
+                saved_subtopic = self.repository.add_curriculum_subtopic(
+                    CurriculumSubtopic(
+                        id=None,
+                        curriculum_topic_id=curriculum_topic_id,
+                        slug=generated_subtopic.slug,
+                        title=generated_subtopic.title,
+                        description=generated_subtopic.description,
+                        source="llm-seed",
+                        order_index=subtopic_index + 1,
+                    )
+                )
+                if existing_subtopic is None:
+                    subtopics_saved += 1
+                for objective_index, objective in enumerate(generated_subtopic.objectives):
+                    existing_objective = self.repository.find_curriculum_objective_by_text_source(
+                        curriculum_topic_id,
+                        saved_subtopic.id,
+                        objective,
+                        "llm-seed",
+                    )
+                    self.repository.add_curriculum_objective(
+                        CurriculumObjective(
+                            id=None,
+                            curriculum_topic_id=curriculum_topic_id,
+                            curriculum_subtopic_id=saved_subtopic.id,
+                            text=objective,
+                            source="llm-seed",
+                            order_index=objective_index + 1,
+                        )
+                    )
+                    if existing_objective is None:
+                        objectives_saved += 1
+            for generated_question in generated_topic.questions:
+                already_exists = self.repository.question_exists(
+                    topic.id or 0,
+                    generated_question.prompt,
+                    "llm-seed",
+                )
+                saved = self.repository.add_question_once(
+                    Question(
+                        id=None,
+                        topic_id=topic.id or 0,
+                        difficulty=normalize_difficulty(generated_question.difficulty),
+                        prompt=generated_question.prompt,
+                        hint=generated_question.hint,
+                        reference_answer=generated_question.reference_answer,
+                        source="llm-seed",
+                        source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+                    )
+                )
+                if saved.id is not None and not already_exists:
+                    questions_saved += 1
+        return CurriculumImportResult(
+            topics_saved=topics_saved,
+            questions_saved=questions_saved,
+            curriculum=curriculum,
+            curriculum_topics_saved=curriculum_topics_saved,
+            subtopics_saved=subtopics_saved,
+            objectives_saved=objectives_saved,
+        )
+
+    def status(self, source: str = "llm-seed") -> CurriculumStatus:
+        curriculum_topics = self.repository.list_curriculum_topics(source=source)
+        topic_statuses: list[CurriculumTopicStatus] = []
+        empty_zones: list[str] = []
+        subtopic_count = 0
+        objective_count = 0
+        question_count = 0
+
+        if not curriculum_topics:
+            empty_zones.append("generated curriculum отсутствует; база работает только на bootstrap/fallback")
+
+        for curriculum_topic in curriculum_topics:
+            curriculum_topic_id = curriculum_topic.id or 0
+            subtopics = self.repository.list_curriculum_subtopics(curriculum_topic_id)
+            topic_objectives = self.repository.list_curriculum_objectives(curriculum_topic_id)
+            subtopic_objective_count = 0
+            topic_empty_zones: list[str] = []
+
+            for subtopic in subtopics:
+                objectives = self.repository.list_curriculum_objectives(curriculum_topic_id, subtopic.id)
+                subtopic_objective_count += len(objectives)
+                if not objectives:
+                    topic_empty_zones.append(f"subtopic {subtopic.slug}: нет objectives")
+
+            current_subtopic_count = len(subtopics)
+            current_objective_count = len(topic_objectives) + subtopic_objective_count
+            current_question_count = 0
+            topic_title: str | None = None
+            if curriculum_topic.topic_id is None:
+                topic_empty_zones.append("нет связанной app topic")
+            else:
+                topic = self.repository.get_topic(curriculum_topic.topic_id)
+                topic_title = topic.title if topic is not None else None
+                if topic is None:
+                    topic_empty_zones.append("связанная app topic не найдена")
+                questions = self.repository.list_questions(curriculum_topic.topic_id)
+                current_question_count = len([question for question in questions if question.source == source])
+
+            if not subtopics:
+                topic_empty_zones.append("нет subtopics")
+            if current_objective_count == 0:
+                topic_empty_zones.append("нет objectives")
+            if current_question_count == 0:
+                topic_empty_zones.append("нет generated questions")
+
+            if topic_empty_zones:
+                empty_zones.append(f"{curriculum_topic.slug}: {', '.join(topic_empty_zones)}")
+
+            subtopic_count += current_subtopic_count
+            objective_count += current_objective_count
+            question_count += current_question_count
+            topic_statuses.append(
+                CurriculumTopicStatus(
+                    curriculum_topic=curriculum_topic,
+                    topic_title=topic_title,
+                    subtopic_count=current_subtopic_count,
+                    objective_count=current_objective_count,
+                    question_count=current_question_count,
+                    empty_zones=tuple(topic_empty_zones),
+                )
+            )
+
+        return CurriculumStatus(
+            source=source,
+            app_topic_count=len(self.repository.list_topics()),
+            curriculum_topic_count=len(curriculum_topics),
+            subtopic_count=subtopic_count,
+            objective_count=objective_count,
+            question_count=question_count,
+            empty_zones=tuple(empty_zones),
+            topics=tuple(topic_statuses),
+        )
+
+    def suggest_next_topic(
+        self,
+        source: str = "llm-seed",
+        weak_score_threshold: int = 3,
+    ) -> TopicRecommendation | None:
+        curriculum_topics = [
+            item for item in self.repository.list_curriculum_topics(source=source) if item.topic_id is not None
+        ]
+        candidates = self._recommendation_candidates(curriculum_topics)
+        if not candidates:
+            fallback_topics = self.repository.list_topics()
+            candidates = self._recommendation_candidates([None] * len(fallback_topics), fallback_topics)
+        if not candidates:
+            return None
+
+        unanswered = [candidate for candidate in candidates if candidate.answers == 0]
+        if unanswered:
+            selected = min(unanswered, key=lambda candidate: candidate.order_index)
+            return selected.to_recommendation("Следующая новая тема по curriculum order.")
+
+        weak = [
+            candidate
+            for candidate in candidates
+            if candidate.avg_self_score is not None and candidate.avg_self_score <= weak_score_threshold
+        ]
+        if weak:
+            selected = min(
+                weak,
+                key=lambda candidate: (
+                    candidate.avg_self_score if candidate.avg_self_score is not None else 0.0,
+                    candidate.last_answered_at or datetime.min,
+                    candidate.order_index,
+                ),
+            )
+            return selected.to_recommendation("Слабая тема по self-score; стоит повторить.")
+
+        selected = min(
+            candidates,
+            key=lambda candidate: (
+                candidate.last_answered_at or datetime.min,
+                candidate.avg_self_score if candidate.avg_self_score is not None else 0.0,
+                candidate.order_index,
+            ),
+        )
+        return selected.to_recommendation("Самая давно отвеченная тема в curriculum.")
+
+    def _recommendation_candidates(
+        self,
+        curriculum_topics: list[CurriculumTopic | None],
+        fallback_topics: list[Topic] | None = None,
+    ) -> list["_TopicRecommendationCandidate"]:
+        metrics = self.repository.topic_practice_metrics()
+        candidates: list[_TopicRecommendationCandidate] = []
+        if fallback_topics is not None:
+            for index, topic in enumerate(fallback_topics):
+                candidates.append(_TopicRecommendationCandidate.from_topic(topic, None, index + 1, metrics))
+            return candidates
+
+        for index, curriculum_topic in enumerate(curriculum_topics):
+            if curriculum_topic is None or curriculum_topic.topic_id is None:
+                continue
+            topic = self.repository.get_topic(curriculum_topic.topic_id)
+            if topic is None:
+                continue
+            candidates.append(
+                _TopicRecommendationCandidate.from_topic(
+                    topic,
+                    curriculum_topic,
+                    curriculum_topic.order_index or index + 1,
+                    metrics,
+                )
+            )
+        return candidates
+
+
+@dataclass(frozen=True)
+class _TopicRecommendationCandidate:
+    topic: Topic
+    curriculum_topic: CurriculumTopic | None
+    order_index: int
+    answers: int
+    avg_self_score: float | None
+    last_answered_at: datetime | None
+
+    @classmethod
+    def from_topic(
+        cls,
+        topic: Topic,
+        curriculum_topic: CurriculumTopic | None,
+        order_index: int,
+        metrics: dict[int, dict[str, Any]],
+    ) -> "_TopicRecommendationCandidate":
+        item = metrics.get(topic.id or 0, {})
+        last_answered_at = item.get("last_answered_at")
+        if isinstance(last_answered_at, str):
+            last_answered_at = datetime.fromisoformat(last_answered_at)
+        return cls(
+            topic=topic,
+            curriculum_topic=curriculum_topic,
+            order_index=order_index,
+            answers=int(item.get("answers") or 0),
+            avg_self_score=item.get("avg_self_score"),
+            last_answered_at=last_answered_at,
+        )
+
+    def to_recommendation(self, reason: str) -> TopicRecommendation:
+        return TopicRecommendation(
+            topic=self.topic,
+            curriculum_topic=self.curriculum_topic,
+            reason=reason,
+            answers=self.answers,
+            avg_self_score=self.avg_self_score,
+            last_answered_at=self.last_answered_at,
+        )
+
+
+def build_curriculum_prompt(topic_count: int, questions_per_topic: int) -> str:
+    return f"""
+Generate a Russian learning curriculum starter pack for a middle+ Python backend developer moving toward senior.
+Return JSON only. No Markdown.
+
+The JSON shape must be:
+{{
+  "topics": [
+    {{
+      "slug": "short-kebab-case",
+      "title": "Русское название темы",
+      "description": "Короткое описание",
+      "level": "middle+ or senior",
+      "objectives": ["learning objective 1", "learning objective 2"],
+      "subtopics": [
+        {{
+          "slug": "short-kebab-case",
+          "title": "Русское название подтемы",
+          "description": "Короткое описание подтемы",
+          "objectives": ["subtopic objective 1", "subtopic objective 2"]
+        }}
+      ],
+      "questions": [
+        {{
+          "difficulty": "middle|middle+|senior",
+          "prompt": "Вопрос на русском",
+          "hint": "Подсказка на русском",
+          "reference_answer": "Эталонный ответ на русском"
+        }}
+      ],
+      "mock_scenarios": ["Короткий system design или production scenario на русском"]
+    }}
+  ]
+}}
+
+Requirements:
+- Generate exactly {topic_count} topics.
+- Generate exactly {questions_per_topic} questions per topic.
+- Generate 2-4 subtopics per topic, with 1-3 learning objectives per subtopic.
+- Cover Python internals, async backend, databases, distributed systems, system design, testing, observability and operational tradeoffs.
+- Questions must be interview-grade, practical, and suitable for 60-minute daily practice.
+- Reference answers must mention mechanisms, tradeoffs, failure modes and production examples.
+- Do not include generic trivia.
+""".strip()
+
+
+def parse_curriculum(raw: str, topic_count: int = 3, questions_per_topic: int = 3) -> GeneratedCurriculum:
+    payload = extract_json_object(raw)
+    topics_payload = payload.get("topics") if isinstance(payload, dict) else None
+    if not isinstance(topics_payload, list):
+        return fallback_curriculum(topic_count, questions_per_topic)
+
+    topics: list[GeneratedTopic] = []
+    for index, item in enumerate(topics_payload):
+        if not isinstance(item, dict):
+            continue
+        title = clean_text(item.get("title")) or f"LLM topic {index + 1}"
+        slug = slugify(clean_text(item.get("slug")) or title)
+        description = clean_text(item.get("description")) or "Сгенерированная тема подготовки."
+        level = clean_text(item.get("level")) or "middle+"
+        objectives = parse_string_list(item.get("objectives"))
+        subtopics = parse_subtopics(item.get("subtopics"))
+        scenarios = parse_string_list(item.get("mock_scenarios"))
+        questions = parse_questions(item.get("questions"), questions_per_topic)
+        topics.append(
+            GeneratedTopic(
+                slug=slug,
+                title=title,
+                description=description,
+                level=level,
+                objectives=objectives,
+                subtopics=subtopics,
+                questions=questions,
+                mock_scenarios=scenarios,
+            )
+        )
+
+    if not topics:
+        return fallback_curriculum(topic_count, questions_per_topic)
+    return GeneratedCurriculum(topics=topics[:topic_count])
+
+
+def extract_json_object(raw: str) -> dict[str, Any]:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end >= start:
+            try:
+                return json.loads(raw[start : end + 1])
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def parse_questions(raw_questions: Any, questions_per_topic: int) -> list[GeneratedQuestion]:
+    if not isinstance(raw_questions, list):
+        return fallback_questions("сгенерированной теме", questions_per_topic)
+    questions: list[GeneratedQuestion] = []
+    for item in raw_questions:
+        if not isinstance(item, dict):
+            continue
+        prompt = clean_text(item.get("prompt"))
+        if not prompt:
+            continue
+        questions.append(
+            GeneratedQuestion(
+                difficulty=clean_text(item.get("difficulty")) or "middle+",
+                prompt=prompt,
+                hint=clean_text(item.get("hint")) or "Покрой механизм, tradeoffs и production failure modes.",
+                reference_answer=clean_text(item.get("reference_answer"))
+                or "Сильный ответ объясняет механизм, tradeoffs, failure modes и production-пример.",
+            )
+        )
+    return questions[:questions_per_topic] or fallback_questions("сгенерированной теме", questions_per_topic)
+
+
+def parse_subtopics(raw_subtopics: Any) -> list[GeneratedSubtopic]:
+    if not isinstance(raw_subtopics, list):
+        return []
+    subtopics: list[GeneratedSubtopic] = []
+    for index, item in enumerate(raw_subtopics):
+        if not isinstance(item, dict):
+            continue
+        title = clean_text(item.get("title")) or f"Подтема {index + 1}"
+        slug = slugify(clean_text(item.get("slug")) or title)
+        description = clean_text(item.get("description")) or "Сгенерированная подтема curriculum."
+        subtopics.append(
+            GeneratedSubtopic(
+                slug=slug,
+                title=title,
+                description=description,
+                objectives=parse_string_list(item.get("objectives")),
+            )
+        )
+    return subtopics
+
+
+def fallback_curriculum(topic_count: int, questions_per_topic: int) -> GeneratedCurriculum:
+    base_topics = [
+        GeneratedTopic(
+            slug="llm-python-runtime",
+            title="Python runtime глубже middle+",
+            description="Объектная модель, память, descriptors, import system, GIL и performance tradeoffs.",
+            level="middle+",
+            objectives=["Объяснять runtime-механику", "Связывать internals с backend production issues"],
+            subtopics=[
+                GeneratedSubtopic(
+                    slug="descriptors-lookup",
+                    title="Descriptors и lookup order",
+                    description="Data/non-data descriptors, properties, methods и ORM patterns.",
+                    objectives=["Объяснять порядок поиска атрибутов", "Связывать descriptors с production bugs"],
+                )
+            ],
+            questions=fallback_questions("Python runtime", questions_per_topic),
+            mock_scenarios=["Разобрать production incident из-за memory leak и blocking CPU-bound обработки."],
+        ),
+        GeneratedTopic(
+            slug="llm-async-production",
+            title="Async backend в production",
+            description="Cancellation, backpressure, worker pools, очереди, retries и graceful shutdown.",
+            level="senior",
+            objectives=["Проектировать устойчивые async flows", "Диагностировать saturation и latency"],
+            subtopics=[
+                GeneratedSubtopic(
+                    slug="backpressure-cancellation",
+                    title="Backpressure и cancellation",
+                    description="Bounded queues, cancellation propagation, retries и graceful shutdown.",
+                    objectives=["Проектировать bounded async pipeline", "Диагностировать queue saturation"],
+                )
+            ],
+            questions=fallback_questions("async backend", questions_per_topic),
+            mock_scenarios=["Спроектировать worker service с external API limits и DLQ."],
+        ),
+        GeneratedTopic(
+            slug="llm-system-design",
+            title="System design для backend-сервисов",
+            description="Requirements, API, storage, scaling, consistency, observability и failure modes.",
+            level="senior",
+            objectives=["Вести design discussion end-to-end", "Называть tradeoffs и operational risks"],
+            subtopics=[
+                GeneratedSubtopic(
+                    slug="requirements-tradeoffs",
+                    title="Requirements и tradeoffs",
+                    description="Functional/non-functional requirements, constraints и design alternatives.",
+                    objectives=["Формулировать assumptions", "Сравнивать alternatives через constraints"],
+                )
+            ],
+            questions=fallback_questions("system design", questions_per_topic),
+            mock_scenarios=["Спроектировать notification platform с retry, preferences и analytics."],
+        ),
+    ]
+    return GeneratedCurriculum(topics=base_topics[:topic_count])
+
+
+def fallback_questions(topic_title: str, count: int) -> list[GeneratedQuestion]:
+    templates = [
+        GeneratedQuestion(
+            "middle+",
+            f"Объясни ключевой production-риск в теме {topic_title} и как ты будешь его диагностировать.",
+            "Назови симптомы, метрики, logs/traces и безопасный mitigation.",
+            "Сильный ответ связывает механизм с пользовательским impact, называет telemetry, план локализации, rollback или mitigation, а затем regression coverage.",
+        ),
+        GeneratedQuestion(
+            "senior",
+            f"Как бы ты спроектировал backend-flow по теме {topic_title} с учетом отказов зависимостей?",
+            "Покрой retries, idempotency, timeouts, backpressure, observability и operational tradeoffs.",
+            "Нужно задать границы системы, определить failure modes, добавить timeouts и bounded retries, обеспечить idempotency, измерять saturation/latency/errors и выбрать degrade strategy.",
+        ),
+        GeneratedQuestion(
+            "senior",
+            f"Какие tradeoffs в теме {topic_title} чаще всего отличают senior-ответ от middle-ответа?",
+            "Сравни простое решение, production constraints, стоимость поддержки и проверяемость.",
+            "Senior-ответ явно фиксирует assumptions, сравнивает альтернативы, говорит о цене сложности, failure modes, мониторинге и способе проверить решение нагрузкой или тестами.",
+        ),
+    ]
+    if count <= len(templates):
+        return templates[:count]
+    return templates + [templates[-1] for _ in range(count - len(templates))]
+
+
+def parse_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [clean_text(item) for item in value if clean_text(item)]
+
+
+def clean_text(value: Any) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def slugify(value: str) -> str:
+    lowered = value.strip().lower()
+    translit = lowered.translate(
+        str.maketrans(
+            {
+                "а": "a",
+                "б": "b",
+                "в": "v",
+                "г": "g",
+                "д": "d",
+                "е": "e",
+                "ё": "e",
+                "ж": "zh",
+                "з": "z",
+                "и": "i",
+                "й": "y",
+                "к": "k",
+                "л": "l",
+                "м": "m",
+                "н": "n",
+                "о": "o",
+                "п": "p",
+                "р": "r",
+                "с": "s",
+                "т": "t",
+                "у": "u",
+                "ф": "f",
+                "х": "h",
+                "ц": "c",
+                "ч": "ch",
+                "ш": "sh",
+                "щ": "sch",
+                "ъ": "",
+                "ы": "y",
+                "ь": "",
+                "э": "e",
+                "ю": "yu",
+                "я": "ya",
+            }
+        )
+    )
+    slug = re.sub(r"[^a-z0-9]+", "-", translit).strip("-")
+    return slug or "llm-generated-topic"

@@ -1,0 +1,795 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from datetime import datetime, timedelta
+from io import StringIO
+from pathlib import Path
+from unittest.mock import patch
+
+from interview_prep.domain.models import (
+    Answer,
+    CurriculumObjective,
+    CurriculumSubtopic,
+    CurriculumTopic,
+    QUESTION_SOURCE_QUALITY_ACCEPTED,
+    QUESTION_SOURCE_QUALITY_ARCHIVED,
+    QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+    Question,
+    QuestionCompetencyLink,
+    Session,
+    SessionOutcome,
+    SystemDesignScenario,
+    Tag,
+)
+from interview_prep.infra.database import connect, init_db
+from interview_prep.infra.llm import FallbackLLMClient, LLMClient, LLMUnavailable, ResilientLLMClient
+from interview_prep.infra.repositories import SQLiteRepository
+from interview_prep.services.evaluation_service import EvaluationService
+from interview_prep.services.system_design_service import SystemDesignService
+from interview_prep.ui.cli import read_answer
+
+
+class CLIFlowTests(unittest.TestCase):
+    def test_read_answer_single_line_finishes_on_enter(self) -> None:
+        with patch("builtins.input", return_value="Descriptor answer"):
+            self.assertEqual(read_answer(), "Descriptor answer")
+
+    def test_read_answer_multiline_has_explicit_terminator(self) -> None:
+        with patch("builtins.input", side_effect=["/multi", "line one", "line two", ""]), redirect_stdout(
+            StringIO()
+        ):
+            self.assertEqual(read_answer(), "line one\nline two")
+
+    def test_session_no_feedback_saves_answer_after_single_line_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "session.db"
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "session",
+                    "--topic",
+                    "1",
+                    "--no-feedback",
+                    "--db",
+                    str(db_path),
+                ],
+                input="n\nОтвет про дескрипторы\nn\n",
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("Ответ принят.", process.stdout)
+        self.assertNotIn("Self-score", process.stdout)
+        self.assertNotIn("Now rate your answer.", process.stdout)
+        self.assertIn("Сохраняю ответ...", process.stdout)
+        self.assertIn("Ответ сохранен как #1.", process.stdout)
+        self.assertNotIn("Генерирую AI feedback", process.stdout)
+
+    def test_content_generation_commands_are_registered(self) -> None:
+        process = subprocess.run(
+            [sys.executable, "-m", "interview_prep", "--help"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("content-enqueue", process.stdout)
+        self.assertIn("content-worker", process.stdout)
+        self.assertIn("content-jobs", process.stdout)
+        self.assertIn("curriculum-status", process.stdout)
+        self.assertIn("questions-review", process.stdout)
+        self.assertIn("evaluations", process.stdout)
+        self.assertIn("session-summary", process.stdout)
+        self.assertIn("system-design-history", process.stdout)
+
+    def test_content_enqueue_accepts_non_question_kinds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "content.db"
+            learning_process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "content-enqueue",
+                    "--topic",
+                    "1",
+                    "--kind",
+                    "learning-material",
+                    "Разбор descriptors",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            reference_process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "content-enqueue",
+                    "--topic",
+                    "1",
+                    "--kind",
+                    "reference-answer",
+                    "Обнови эталонные ответы",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(learning_process.returncode, 0, learning_process.stderr)
+        self.assertIn("[learning-material] queued", learning_process.stdout)
+        self.assertEqual(reference_process.returncode, 0, reference_process.stderr)
+        self.assertIn("[reference-answer] queued", reference_process.stdout)
+
+    def test_stats_command_shows_senior_readiness_top_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "stats.db"
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "stats",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("Senior readiness", process.stdout)
+        self.assertIn("Signal:", process.stdout)
+        self.assertIn("Label: Нужна baseline-практика", process.stdout)
+        self.assertIn("Top gaps:", process.stdout)
+        self.assertIn("Next action:", process.stdout)
+        self.assertIn("не абсолютная оценка кандидата", process.stdout)
+
+    def test_stats_command_shows_weekly_readiness_trend_when_enough_session_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "stats_trend.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            topic = repository.find_topic_by_slug("python-runtime")
+            self.assertIsNotNone(topic)
+            assert topic is not None
+
+            for ended_at, readiness_delta in (
+                (datetime(2026, 5, 5, 10, 0, 0), 0.10),
+                (datetime(2026, 5, 6, 10, 0, 0), 0.20),
+                (datetime(2026, 5, 13, 10, 0, 0), -0.10),
+            ):
+                session = repository.create_session(
+                    Session(
+                        id=None,
+                        topic_id=topic.id,
+                        started_at=ended_at - timedelta(minutes=30),
+                        ended_at=None,
+                        target_minutes=60,
+                    )
+                )
+                repository.finish_session(session.id or 0, ended_at)
+                repository.upsert_session_outcome(
+                    SessionOutcome(
+                        id=None,
+                        session_id=session.id or 0,
+                        summary="Synthetic readiness trend outcome.",
+                        strengths=[],
+                        gaps=[],
+                        next_drills=[],
+                        readiness_delta=readiness_delta,
+                        created_at=ended_at,
+                    )
+                )
+            repository.close()
+
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "stats",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("Weekly readiness trend:", process.stdout)
+        self.assertIn("2026-05-04..2026-05-10: sessions 2, avg delta +0.15", process.stdout)
+        self.assertIn("2026-05-11..2026-05-17: sessions 1, avg delta -0.10", process.stdout)
+
+    def test_curriculum_status_command_shows_counts_and_empty_zones(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "curriculum_status.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            topic = repository.find_topic_by_slug("python-runtime")
+            self.assertIsNotNone(topic)
+            assert topic is not None
+            curriculum_topic = repository.add_curriculum_topic(
+                CurriculumTopic(
+                    id=None,
+                    topic_id=topic.id,
+                    slug="python-runtime-curriculum",
+                    title="Python runtime curriculum",
+                    description="Runtime internals.",
+                    level="middle+",
+                    source="llm-seed",
+                    order_index=1,
+                )
+            )
+            subtopic = repository.add_curriculum_subtopic(
+                CurriculumSubtopic(
+                    id=None,
+                    curriculum_topic_id=curriculum_topic.id or 0,
+                    slug="descriptors",
+                    title="Descriptors",
+                    description="Descriptor protocol.",
+                    source="llm-seed",
+                    order_index=1,
+                )
+            )
+            repository.add_curriculum_objective(
+                CurriculumObjective(
+                    id=None,
+                    curriculum_topic_id=curriculum_topic.id or 0,
+                    curriculum_subtopic_id=subtopic.id,
+                    text="Объяснять descriptor lookup order.",
+                    source="llm-seed",
+                    order_index=1,
+                )
+            )
+            repository.add_question(
+                Question(
+                    id=None,
+                    topic_id=topic.id or 0,
+                    difficulty="middle+",
+                    prompt="Как работает descriptor lookup order?",
+                    hint="Начни с data descriptors.",
+                    reference_answer="Descriptor lookup проверяет data descriptors до instance dict.",
+                    source="llm-seed",
+                )
+            )
+            repository.close()
+
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "curriculum-status",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("Curriculum status (source=llm-seed)", process.stdout)
+        self.assertIn("Curriculum topics: 1", process.stdout)
+        self.assertIn("Subtopics: 1", process.stdout)
+        self.assertIn("Learning objectives: 1", process.stdout)
+        self.assertIn("Generated questions: 1", process.stdout)
+        self.assertIn("python-runtime-curriculum -> Python runtime", process.stdout)
+        self.assertIn("Empty zones:\n- none", process.stdout)
+
+    def test_questions_command_shows_linked_question_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "questions.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            question = repository.list_questions()[0]
+            concurrency = repository.upsert_tag(Tag(id=None, slug="concurrency", title="Concurrency"))
+            python_runtime = repository.upsert_tag(Tag(id=None, slug="python-runtime", title="Python runtime"))
+            repository.set_question_tags(
+                question.id or 0,
+                [python_runtime.id or 0, concurrency.id or 0],
+            )
+            repository.close()
+
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "questions",
+                    "--topic",
+                    str(question.topic_id),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("Теги: Concurrency (concurrency), Python runtime (python-runtime)", process.stdout)
+
+    def test_questions_command_shows_linked_question_competencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "questions.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            question = repository.list_questions()[0]
+            python_runtime = repository.find_competency_by_slug("python-runtime")
+            observability = repository.find_competency_by_slug("observability")
+            self.assertIsNotNone(python_runtime)
+            self.assertIsNotNone(observability)
+            repository.set_question_competencies(
+                question.id or 0,
+                [
+                    QuestionCompetencyLink(competency=observability, weight=0.25),
+                    QuestionCompetencyLink(competency=python_runtime, is_primary=True, weight=0.75),
+                ],
+            )
+            repository.close()
+
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "questions",
+                    "--topic",
+                    str(question.topic_id),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn(
+            "Компетенции: Python Runtime (python-runtime) [основная], Observability (observability)",
+            process.stdout,
+        )
+
+    def test_questions_command_filters_by_tag_slug(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "questions.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            first_question, second_question = repository.list_questions()[:2]
+            first_prompt = first_question.prompt
+            second_prompt = second_question.prompt
+            concurrency = repository.upsert_tag(Tag(id=None, slug="concurrency", title="Concurrency"))
+            databases = repository.upsert_tag(Tag(id=None, slug="databases", title="Databases"))
+            repository.set_question_tags(first_question.id or 0, [concurrency.id or 0])
+            repository.set_question_tags(second_question.id or 0, [databases.id or 0])
+            repository.close()
+
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "questions",
+                    "--tag",
+                    "concurrency",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn(first_prompt, process.stdout)
+        self.assertIn("Теги: Concurrency (concurrency)", process.stdout)
+        self.assertNotIn(second_prompt, process.stdout)
+
+    def test_questions_review_lists_pending_generated_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "questions_review.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            topic = repository.find_topic_by_slug("async-backend")
+            self.assertIsNotNone(topic)
+            assert topic is not None
+            pending = repository.add_question(
+                Question(
+                    id=None,
+                    topic_id=topic.id or 0,
+                    difficulty="senior",
+                    prompt="Как review-ить generated вопрос перед practice loop?",
+                    hint="Проверь uniqueness, senior coverage и production realism.",
+                    reference_answer="Нужно принять полезные вопросы и архивировать слабые.",
+                    source="background-llm",
+                    source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+                )
+            )
+            accepted = repository.add_question(
+                Question(
+                    id=None,
+                    topic_id=topic.id or 0,
+                    difficulty="middle+",
+                    prompt="Этот вопрос уже принят и не должен быть в pending review.",
+                    hint="accepted не показывается.",
+                    reference_answer="accepted скрыт из pending review.",
+                    source="background-llm",
+                    source_quality_status=QUESTION_SOURCE_QUALITY_ACCEPTED,
+                )
+            )
+            repository.close()
+
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "questions-review",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("Pending generated questions: 1", process.stdout)
+        self.assertIn(f"#{pending.id} Async backend", process.stdout)
+        self.assertIn("Source: background-llm", process.stdout)
+        self.assertIn("Как review-ить generated вопрос", process.stdout)
+        self.assertNotIn(f"#{accepted.id}", process.stdout)
+
+    def test_questions_review_accepts_and_archives_pending_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "questions_review_actions.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            topic = repository.find_topic_by_slug("databases")
+            self.assertIsNotNone(topic)
+            assert topic is not None
+            first = repository.add_question(
+                Question(
+                    id=None,
+                    topic_id=topic.id or 0,
+                    difficulty="senior",
+                    prompt="Когда принимать generated вопрос про индексы?",
+                    hint="Проверь практическую ценность.",
+                    reference_answer="Если вопрос уникальный и покрывает senior tradeoffs.",
+                    source="llm-seed",
+                    source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+                )
+            )
+            second = repository.add_question(
+                Question(
+                    id=None,
+                    topic_id=topic.id or 0,
+                    difficulty="senior",
+                    prompt="Когда архивировать generated вопрос про индексы?",
+                    hint="Проверь дубли и размытость.",
+                    reference_answer="Если вопрос дублирует существующий или не дает useful practice.",
+                    source="llm-seed",
+                    source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+                )
+            )
+            repository.close()
+
+            accept_process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "questions-review",
+                    "accept",
+                    str(first.id),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            archive_process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "questions-review",
+                    "archive",
+                    str(second.id),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+            connection = connect(db_path)
+            repository = SQLiteRepository(connection)
+            accepted = repository.get_question(first.id or 0)
+            archived = repository.get_question(second.id or 0)
+            repository.close()
+
+        self.assertEqual(accept_process.returncode, 0, accept_process.stderr)
+        self.assertIn(f"Question #{first.id} accepted.", accept_process.stdout)
+        self.assertEqual(archive_process.returncode, 0, archive_process.stderr)
+        self.assertIn(f"Question #{second.id} archived.", archive_process.stdout)
+        self.assertIsNotNone(accepted)
+        self.assertIsNotNone(archived)
+        assert accepted is not None
+        assert archived is not None
+        self.assertEqual(accepted.source_quality_status, QUESTION_SOURCE_QUALITY_ACCEPTED)
+        self.assertEqual(archived.source_quality_status, QUESTION_SOURCE_QUALITY_ARCHIVED)
+
+    def test_evaluations_command_shows_saved_rubric_evaluation_for_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "evaluations.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            question = repository.list_questions()[0]
+            session = repository.create_session(
+                Session(
+                    id=None,
+                    topic_id=question.topic_id,
+                    started_at=datetime(2026, 5, 19, 9, 0, 0),
+                    ended_at=None,
+                    target_minutes=60,
+                )
+            )
+            answer = repository.add_answer(
+                Answer(
+                    id=None,
+                    session_id=session.id or 0,
+                    question_id=question.id or 0,
+                    user_answer="Нужно объяснить tradeoffs, rollback, метрики и failure modes.",
+                    self_score=4,
+                    ai_feedback="Свободный AI feedback остается отдельно.",
+                    answered_at=datetime(2026, 5, 19, 9, 10, 0),
+                )
+            )
+            evaluation = EvaluationService(repository).evaluate_and_store_answer(
+                answer,
+                question,
+                use_llm=False,
+            )
+            repository.close()
+
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "evaluations",
+                    "--answer",
+                    str(answer.id),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn(f"Rubric evaluation #{evaluation.id} для ответа #{answer.id}", process.stdout)
+        self.assertIn("Источник: heuristic", process.stdout)
+        self.assertIn("Средний rubric score:", process.stdout)
+        self.assertIn("Scores:", process.stdout)
+        self.assertIn("- Correctness (correctness):", process.stdout)
+        self.assertIn("Evidence:", process.stdout)
+        self.assertIn("Gaps:", process.stdout)
+        self.assertIn("Next drills:", process.stdout)
+
+    def test_session_summary_command_shows_saved_session_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "session_summary.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            topic = repository.list_topics()[0]
+            session = repository.create_session(
+                Session(
+                    id=None,
+                    topic_id=topic.id,
+                    started_at=datetime(2026, 5, 20, 9, 0, 0),
+                    ended_at=None,
+                    target_minutes=60,
+                )
+            )
+            repository.finish_session(session.id or 0, datetime(2026, 5, 20, 9, 45, 0))
+            outcome = repository.upsert_session_outcome(
+                SessionOutcome(
+                    id=None,
+                    session_id=session.id or 0,
+                    summary="Сильный разбор очередей, но не хватило failure-mode деталей.",
+                    strengths=["Связал retries с идемпотентностью."],
+                    gaps=["Не описал DLQ и observability."],
+                    next_drills=["Повторить retry boundaries."],
+                    readiness_delta=0.12,
+                    created_at=datetime(2026, 5, 20, 9, 46, 0),
+                )
+            )
+            repository.close()
+
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "session-summary",
+                    str(session.id),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn(f"Session outcome #{outcome.id} для session #{session.id}", process.stdout)
+        self.assertIn("Readiness delta: +0.12", process.stdout)
+        self.assertIn("Summary: Сильный разбор очередей", process.stdout)
+        self.assertIn("Strengths:", process.stdout)
+        self.assertIn("- Связал retries с идемпотентностью.", process.stdout)
+        self.assertIn("Gaps:", process.stdout)
+        self.assertIn("- Не описал DLQ и observability.", process.stdout)
+        self.assertIn("Next drills:", process.stdout)
+
+    def test_system_design_history_command_shows_feedback_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "system_design_history.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            topic = repository.find_topic_by_slug("system-design")
+            self.assertIsNotNone(topic)
+            assert topic is not None
+            scenario = repository.add_system_design_scenario(
+                SystemDesignScenario(
+                    id=None,
+                    topic_id=topic.id or 0,
+                    title="Notification service mock",
+                    scenario="Спроектируй сервис уведомлений с retries и abuse protection.",
+                    focus_areas=["capacity", "retries", "observability"],
+                    source="test",
+                    created_at=datetime(2026, 5, 21, 9, 0, 0),
+                )
+            )
+            service = SystemDesignService(repository, FallbackLLMClient())
+            service.save_transcript_turn(
+                topic.id or 0,
+                "Нужно отправлять email и push через очередь, retry делать идемпотентно.",
+                "Какие SLO и лимиты по throughput ты заложишь?",
+                scenario_id=scenario.id,
+            )
+            service.add_artifact(
+                topic.id or 0,
+                "requirements",
+                "SLO: 99.9%, p95 enqueue latency < 100 ms.",
+                scenario_id=scenario.id,
+            )
+            service.add_artifact(
+                topic.id or 0,
+                "api",
+                "POST /notifications с idempotency_key.",
+                scenario_id=scenario.id,
+            )
+            service.add_artifact(
+                topic.id or 0,
+                "risks",
+                "Provider outage: retry with backoff, DLQ and alerts.",
+                scenario_id=scenario.id,
+            )
+            feedback = service.save_final_feedback(
+                topic.id or 0,
+                "Сильный фокус на retries, но нужно подробнее раскрыть data model.",
+                scenario_id=scenario.id,
+                source="test",
+            )
+            repository.close()
+
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "system-design-history",
+                    "--feedback",
+                    str(feedback.id),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn(f"System design feedback #{feedback.id}", process.stdout)
+        self.assertIn("Scenario: #", process.stdout)
+        self.assertIn("Notification service mock", process.stdout)
+        self.assertIn("Scenario text:", process.stdout)
+        self.assertIn("Transcript:", process.stdout)
+        self.assertIn("Кандидат: Нужно отправлять email", process.stdout)
+        self.assertIn("Интервьюер: Какие SLO", process.stdout)
+        self.assertIn("Artifacts:", process.stdout)
+        self.assertIn("requirements:", process.stdout)
+        self.assertIn("POST /notifications", process.stdout)
+        self.assertIn("Final feedback:", process.stdout)
+        self.assertIn("Сильный фокус на retries", process.stdout)
+        self.assertIn("System design rubric", process.stdout)
+        self.assertIn("Average score:", process.stdout)
+
+
+class FailingLLM(LLMClient):
+    def generate(self, prompt: str) -> str:
+        raise LLMUnavailable("test timeout")
+
+
+class LLMFallbackTests(unittest.TestCase):
+    def test_resilient_llm_uses_fallback_when_primary_is_unavailable(self) -> None:
+        client = ResilientLLMClient(FailingLLM(), FallbackLLMClient())
+
+        response = client.generate("feedback please")
+
+        self.assertIn("Ollama недоступна", response)
+        self.assertEqual(client.last_error, "test timeout")
+
+
+if __name__ == "__main__":
+    unittest.main()

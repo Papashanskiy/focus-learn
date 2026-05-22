@@ -1,0 +1,13 @@
+[project]
+name = "interview-prep"
+version = "0.1.0"
+description = "Local terminal app for daily Python backend interview preparation."
+requires-python = ">=3.11"
+dependencies = [
+    "rich>=13",
+    "textual>=0.89",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
