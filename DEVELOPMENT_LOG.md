@@ -2,6 +2,32 @@
 
 ## 2026-05-22
 
+### TUI system design entry controller
+
+- Первый unchecked roadmap item про system-design state transitions оказался слишком крупным для одного безопасного шага, поэтому он разбит в `## Next` на smaller controller leaves.
+- Закрыт первый leaf: вход в `/system-design` теперь использует pure `interview_prep.ui.system_design_controller.build_system_design_entry_snapshot()` для return mode, сохраненного practice context, scenario/transcript reset contract и focused-mode feedback.
+- `InterviewPrepTUI.enter_system_design()` применяет snapshot перед прежними side effects: запуск/выбор session topic, background content/scenario orchestration, artifact restore и render flow остались в TUI.
+- Проверки: `python -m unittest tests.test_tui.SystemDesignControllerTests tests.test_tui.TUITests.test_tui_auto_queues_system_design_scenario_when_entering_mode tests.test_tui.TUITests.test_tui_reuses_saved_system_design_scenario_without_queueing_job tests.test_tui.TUITests.test_tui_clicking_mode_actions_switches_main_workflows tests.test_tui.TUITests.test_tui_composer_submits_multiline_code_block_to_system_design -v`, `python -m unittest tests.test_tui.TUITests.test_tui_system_design_mode_runs_interviewer_flow_without_saving_answer tests.test_tui.TUITests.test_tui_persists_and_restores_system_design_artifacts_for_scenario -v`, `python -m compileall interview_prep`.
+
+### TUI learning finish controller
+
+- Закрыт roadmap leaf про finish-learning transition: ответ learning LLM теперь проходит через pure `interview_prep.ui.learning_controller.build_learning_finish_snapshot()` для fallback/ok статуса, history message, transcript entries, pending state, dialog offset и финального `last_feedback`.
+- `InterviewPrepTUI.finish_learning()` применяет snapshot вокруг прежних side effects: сохранение learning transcript/notebook осталось в TUI/service path, а learning-mode controller leaves теперь закрыты полностью.
+- Проверки: `python -m unittest tests.test_tui.LearningControllerTests tests.test_tui.TUITests.test_tui_learning_mode_persists_dialog_through_service tests.test_tui.TUITests.test_tui_composer_submits_multiline_code_block_to_learning tests.test_tui.TUIHelperTests.test_learning_text_uses_chat_renderer_for_dialog_and_pending_message -v`, `python -m compileall interview_prep`.
+
+### TUI learning request controller
+
+- Закрыт roadmap leaf про request/loading transition: отправка учебного вопроса теперь использует pure `interview_prep.ui.learning_controller.build_learning_request_snapshot()` для dialog session id, pending message, loading mode, Ollama status и history message.
+- `InterviewPrepTUI.request_learning()` применяет snapshot перед прежними side effects: lookup topic/question context, async LLM call, save transcript/notebook и render flow остались в TUI.
+- Проверки: `python -m unittest tests.test_tui.LearningControllerTests tests.test_tui.TUITests.test_tui_learning_mode_persists_dialog_through_service tests.test_tui.TUITests.test_tui_composer_submits_multiline_code_block_to_learning tests.test_tui.TUITests.test_tui_learning_before_topic_selection_does_not_load_saved_topic_dialog -v`, `python -m compileall interview_prep`.
+
+### TUI learning entry controller
+
+- Первый unchecked roadmap item про learning-mode state transitions оказался слишком крупным для одного безопасного шага, поэтому он разбит в `## Next` на smaller controller leaves.
+- Закрыт первый leaf: вход в `/learn` теперь использует pure `interview_prep.ui.learning_controller.build_learning_entry_snapshot()` для return mode, dialog session id, topic context и решений по generated learning material.
+- `InterviewPrepTUI` применяет snapshot перед прежними UI/storage side effects: history, загрузка transcript, проверка material backlog и render flow остались в TUI.
+- Проверки: `python -m unittest tests.test_tui.LearningControllerTests tests.test_tui.TUITests.test_tui_auto_queues_learning_material_when_entering_learning_mode tests.test_tui.TUITests.test_tui_reuses_saved_learning_material_without_queueing_job tests.test_tui.TUITests.test_tui_learning_before_topic_selection_does_not_load_saved_topic_dialog -v`, `python -m compileall interview_prep`.
+
 ### TUI practice answer transition controller
 
 - Закрыт roadmap leaf про answer -> scoring -> answered contract: `interview_prep.ui.practice_controller` теперь содержит pure snapshots для сохраненного ответа, завершенной самооценки и перехода к следующему вопросу, а также parsing optional self-score.

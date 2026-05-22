@@ -41,6 +41,14 @@ from interview_prep.services.content_generation_service import (
 from interview_prep.services.curriculum_service import TopicRecommendation
 from interview_prep.services.session_service import FeedbackQuality
 from interview_prep.services.system_design_service import DEFAULT_SYSTEM_DESIGN_SCENARIO
+from interview_prep.ui.learning_controller import (
+    LearningEntrySnapshot,
+    LearningFinishSnapshot,
+    LearningRequestSnapshot,
+    build_learning_finish_snapshot,
+    build_learning_entry_snapshot,
+    build_learning_request_snapshot,
+)
 from interview_prep.ui.practice_controller import (
     PracticeAnsweredSnapshot,
     PracticeAnswerScoringSnapshot,
@@ -55,6 +63,10 @@ from interview_prep.ui.practice_controller import (
     build_practice_session_start_snapshot,
     decide_practice_submit,
     parse_practice_self_score,
+)
+from interview_prep.ui.system_design_controller import (
+    SystemDesignEntrySnapshot,
+    build_system_design_entry_snapshot,
 )
 from interview_prep.ui.tui_render import (
     NOTES_DRAFT_CONTEXT_TYPE,
@@ -1775,33 +1787,39 @@ class InterviewPrepTUI(App[None]):
         self.render_all()
 
     def enter_learning(self, initial_question: str = "") -> None:
-        source_mode = self.mode
-        if self.mode not in {"learning", "loading_learning"}:
-            self.learning_return_mode = self.mode
-            self.learning_dialog_session_id = f"learn-{uuid4().hex[:12]}"
-        elif self.learning_dialog_session_id is None:
-            self.learning_dialog_session_id = f"learn-{uuid4().hex[:12]}"
-        topic_id = self.learning_context_topic_id(source_mode)
-        if topic_id is None and source_mode == "select_topic" and self.session is None:
-            self.topic = None
-            self.question = None
-        self.mode = "learning"
-        self.command_palette_visible = False
-        self.last_feedback = (
-            "Режим обучения.\n"
-            "Напиши, что непонятно по текущей теме или вопросу.\n"
-            "Команда /practice вернет к интервью-сессии."
+        snapshot = build_learning_entry_snapshot(
+            current_mode=self.mode,
+            current_topic_id=self.topic.id if self.topic is not None else None,
+            session_topic_id=self.session.topic_id if self.session is not None else None,
+            has_session=self.session is not None,
+            current_learning_return_mode=self.learning_return_mode,
+            current_learning_dialog_session_id=self.learning_dialog_session_id,
+            generated_learning_material=self.generated_learning_material,
+            generated_learning_material_topic_id=self.generated_learning_material_topic_id,
+            new_dialog_session_id=f"learn-{uuid4().hex[:12]}",
         )
+        self.apply_learning_entry_snapshot(snapshot)
         self.add_history("Открыт режим обучения.")
-        self.load_learning_transcript_for_topic(topic_id)
-        if topic_id is None:
+        self.load_learning_transcript_for_topic(snapshot.learning_topic_id)
+        if snapshot.should_clear_generated_learning_material:
             self.generated_learning_material = None
             self.generated_learning_material_topic_id = None
-        elif not self.generated_learning_material or self.generated_learning_material_topic_id != topic_id:
-            self.ensure_background_learning_material_for_topic(topic_id)
+        elif snapshot.should_ensure_learning_material:
+            self.ensure_background_learning_material_for_topic(snapshot.learning_topic_id)
         self.render_all()
         if initial_question:
             self.request_learning(initial_question)
+
+    def apply_learning_entry_snapshot(self, snapshot: LearningEntrySnapshot) -> None:
+        self.learning_return_mode = snapshot.learning_return_mode
+        self.learning_dialog_session_id = snapshot.learning_dialog_session_id
+        self.learning_topic_id = snapshot.learning_topic_id
+        if snapshot.clear_current_practice_context:
+            self.topic = None
+            self.question = None
+        self.mode = snapshot.mode
+        self.command_palette_visible = snapshot.command_palette_visible
+        self.last_feedback = snapshot.last_feedback
 
     def learning_context_topic_id(self, source_mode: Mode | None = None) -> int | None:
         if source_mode == "select_topic" and self.session is None:
@@ -1873,28 +1891,28 @@ class InterviewPrepTUI(App[None]):
         self.render_all()
 
     def enter_system_design(self, scenario: str = "", scenario_id: int | None = None) -> None:
-        if self.mode not in {
-            "system_design",
-            "loading_system_design",
-            "loading_system_design_checkpoint",
-            "loading_system_design_pressure",
-            "loading_system_design_feedback",
-        }:
-            self.system_design_return_mode = self.mode
-            self.system_design_saved_topic = self.topic
-            self.system_design_saved_question = self.question
-            self.system_design_saved_answer = self.current_answer
-            self.system_design_saved_pending_answer = self.pending_answer_text
-            self.system_design_saved_showing_hint = self.showing_hint
-            self.system_design_saved_showing_reference = self.showing_reference
-        if scenario:
-            self.system_design_scenario = scenario
-            self.system_design_scenario_id = scenario_id
-            self.system_design_transcript = []
-            self.reset_system_design_artifacts()
-        elif not self.system_design_transcript:
-            self.system_design_scenario = DEFAULT_SYSTEM_DESIGN_SCENARIO
-            self.system_design_scenario_id = None
+        snapshot = build_system_design_entry_snapshot(
+            current_mode=self.mode,
+            current_topic=self.topic,
+            current_question=self.question,
+            current_answer=self.current_answer,
+            current_pending_answer=self.pending_answer_text,
+            current_showing_hint=self.showing_hint,
+            current_showing_reference=self.showing_reference,
+            current_system_design_return_mode=self.system_design_return_mode,
+            current_system_design_saved_topic=self.system_design_saved_topic,
+            current_system_design_saved_question=self.system_design_saved_question,
+            current_system_design_saved_answer=self.system_design_saved_answer,
+            current_system_design_saved_pending_answer=self.system_design_saved_pending_answer,
+            current_system_design_saved_showing_hint=self.system_design_saved_showing_hint,
+            current_system_design_saved_showing_reference=self.system_design_saved_showing_reference,
+            current_system_design_scenario=self.system_design_scenario,
+            current_system_design_scenario_id=self.system_design_scenario_id,
+            current_system_design_transcript=self.system_design_transcript,
+            scenario=scenario,
+            scenario_id=scenario_id,
+        )
+        self.apply_system_design_entry_snapshot(snapshot)
 
         if self.session is None:
             topic = self.services.repository.find_topic_by_slug("system-design")
@@ -1912,21 +1930,29 @@ class InterviewPrepTUI(App[None]):
             if system_topic is not None:
                 self.topic = system_topic
 
-        self.showing_hint = False
-        self.showing_reference = False
-        self.mode = "system_design"
-        self.last_feedback = (
-            "System Design Mock Interview.\n"
-            "Ты проектируешь сервис end-to-end, ИИ играет интервьюера.\n"
-            "Пиши следующий шаг решения в composer. /sd-checkpoint даст короткую проверку, "
-            "/sd-pressure даст pressure follow-up, /sd-feedback даст итоговую оценку, "
-            "/practice вернет к вопросам."
-        )
         self.add_history("Открыт system design mock interview.")
         self.ensure_background_content_for_current_topic()
         self.ensure_background_system_design_scenario()
         self.restore_system_design_artifacts()
         self.render_all()
+
+    def apply_system_design_entry_snapshot(self, snapshot: SystemDesignEntrySnapshot) -> None:
+        self.system_design_return_mode = snapshot.system_design_return_mode
+        self.system_design_saved_topic = snapshot.system_design_saved_topic
+        self.system_design_saved_question = snapshot.system_design_saved_question
+        self.system_design_saved_answer = snapshot.system_design_saved_answer
+        self.system_design_saved_pending_answer = snapshot.system_design_saved_pending_answer
+        self.system_design_saved_showing_hint = snapshot.system_design_saved_showing_hint
+        self.system_design_saved_showing_reference = snapshot.system_design_saved_showing_reference
+        self.system_design_scenario = snapshot.system_design_scenario
+        self.system_design_scenario_id = snapshot.system_design_scenario_id
+        self.system_design_transcript = list(snapshot.system_design_transcript)
+        if snapshot.should_reset_artifacts:
+            self.reset_system_design_artifacts()
+        self.showing_hint = snapshot.showing_hint
+        self.showing_reference = snapshot.showing_reference
+        self.mode = snapshot.mode
+        self.last_feedback = snapshot.last_feedback
 
     def ensure_background_content_for_current_topic(self) -> None:
         if self.session is None or self.session.topic_id is None:
@@ -2546,22 +2572,19 @@ class InterviewPrepTUI(App[None]):
         self.render_all()
 
     def request_learning(self, user_message: str) -> None:
-        topic_id = self.learning_topic_id
-        self.learning_topic_id = topic_id
-        if self.learning_dialog_session_id is None:
-            self.learning_dialog_session_id = f"learn-{uuid4().hex[:12]}"
+        snapshot = build_learning_request_snapshot(
+            user_message=user_message,
+            current_learning_topic_id=self.learning_topic_id,
+            current_learning_dialog_session_id=self.learning_dialog_session_id,
+            new_dialog_session_id=f"learn-{uuid4().hex[:12]}",
+        )
+        self.apply_learning_request_snapshot(snapshot)
+        topic_id = snapshot.learning_topic_id
         topic = self.topic if self.topic is not None and self.topic.id == topic_id else None
         if topic is None and topic_id is not None:
             topic = self.services.repository.get_topic(topic_id)
         question = self.question if self.question is not None and self.question.topic_id == topic_id else None
-        self.learning_question = user_message
-        self.learning_pending_message = user_message
-        self.learning_dialog_offset = 0
-        self.command_palette_visible = False
-        self.mode = "loading_learning"
-        self.ollama_status = "разбирает тему..."
-        self.last_feedback = ""
-        self.add_history("Готовлю учебное объяснение через Ollama...")
+        self.add_history(snapshot.history_message)
         self.render_all()
 
         def work() -> None:
@@ -2583,22 +2606,36 @@ class InterviewPrepTUI(App[None]):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def apply_learning_request_snapshot(self, snapshot: LearningRequestSnapshot) -> None:
+        self.learning_topic_id = snapshot.learning_topic_id
+        self.learning_dialog_session_id = snapshot.learning_dialog_session_id
+        self.learning_question = snapshot.learning_question
+        self.learning_pending_message = snapshot.learning_pending_message
+        self.learning_dialog_offset = snapshot.learning_dialog_offset
+        self.command_palette_visible = snapshot.command_palette_visible
+        self.mode = snapshot.mode
+        self.ollama_status = snapshot.ollama_status
+        self.last_feedback = snapshot.last_feedback
+
     def finish_learning(self, explanation: str, last_error: str | None) -> None:
-        self.ollama_status = "fallback" if last_error else "ok"
-        title = f"Учебный разбор\nВопрос: {self.learning_question}"
-        if last_error:
-            self.add_history(f"Учебный fallback: {last_error}")
-        else:
-            self.add_history("Учебный разбор готов.")
+        snapshot = build_learning_finish_snapshot(
+            explanation=explanation,
+            learning_question=self.learning_question,
+            last_error=last_error,
+        )
+        self.ollama_status = snapshot.ollama_status
+        self.add_history(snapshot.history_message)
         self.save_learning_exchange(explanation)
-        if self.learning_question:
-            self.learning_transcript.append(("Ты", self.learning_question))
-        self.learning_transcript.append(("ИИ", explanation))
-        self.learning_pending_message = ""
-        self.learning_dialog_offset = 0
-        self.last_feedback = f"{title}\n\n{explanation}"
-        self.mode = "learning"
+        self.apply_learning_finish_snapshot(snapshot)
         self.render_all()
+
+    def apply_learning_finish_snapshot(self, snapshot: LearningFinishSnapshot) -> None:
+        self.ollama_status = snapshot.ollama_status
+        self.learning_transcript.extend(snapshot.transcript_entries)
+        self.learning_pending_message = snapshot.learning_pending_message
+        self.learning_dialog_offset = snapshot.learning_dialog_offset
+        self.last_feedback = snapshot.last_feedback
+        self.mode = snapshot.mode
 
     def save_learning_exchange(self, explanation: str) -> None:
         if self.learning_topic_id is None or not hasattr(self.services.learning, "add_dialog_message"):

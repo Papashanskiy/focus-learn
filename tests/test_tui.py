@@ -40,7 +40,14 @@ from interview_prep.services.session_service import (
     FeedbackQuality,
     GeneratedFeedback,
 )
-from interview_prep.services.system_design_service import SystemDesignService
+from interview_prep.services.system_design_service import DEFAULT_SYSTEM_DESIGN_SCENARIO, SystemDesignService
+from interview_prep.ui.learning_controller import (
+    LEARNING_ENTRY_FEEDBACK,
+    build_learning_entry_snapshot,
+    build_learning_finish_snapshot,
+    build_learning_request_snapshot,
+    resolve_learning_context_topic_id,
+)
 from interview_prep.ui.practice_controller import (
     build_practice_answer_scoring_snapshot,
     build_practice_answered_snapshot,
@@ -49,6 +56,10 @@ from interview_prep.ui.practice_controller import (
     build_practice_session_start_snapshot,
     decide_practice_submit,
     parse_practice_self_score,
+)
+from interview_prep.ui.system_design_controller import (
+    SYSTEM_DESIGN_ENTRY_FEEDBACK,
+    build_system_design_entry_snapshot,
 )
 from interview_prep.ui.tui import (
     Composer,
@@ -227,6 +238,302 @@ class PracticeControllerTests(unittest.TestCase):
         self.assertFalse(snapshot.showing_hint)
         self.assertFalse(snapshot.showing_reference)
         self.assertEqual(snapshot.mode, "answering")
+
+
+class LearningControllerTests(unittest.TestCase):
+    def test_resolve_learning_context_topic_id_keeps_pre_topic_learning_topicless(self) -> None:
+        self.assertIsNone(
+            resolve_learning_context_topic_id(
+                source_mode="select_topic",
+                current_topic_id=1,
+                session_topic_id=None,
+                has_session=False,
+            )
+        )
+
+        self.assertEqual(
+            resolve_learning_context_topic_id(
+                source_mode="answering",
+                current_topic_id=1,
+                session_topic_id=2,
+                has_session=True,
+            ),
+            1,
+        )
+
+        self.assertEqual(
+            resolve_learning_context_topic_id(
+                source_mode="answered",
+                current_topic_id=None,
+                session_topic_id=2,
+                has_session=True,
+            ),
+            2,
+        )
+
+    def test_build_learning_entry_snapshot_starts_topicless_learning_cleanly(self) -> None:
+        snapshot = build_learning_entry_snapshot(
+            current_mode="select_topic",
+            current_topic_id=1,
+            session_topic_id=None,
+            has_session=False,
+            current_learning_return_mode="answering",
+            current_learning_dialog_session_id="old-session",
+            generated_learning_material="stale material",
+            generated_learning_material_topic_id=1,
+            new_dialog_session_id="new-learning-session",
+        )
+
+        self.assertEqual(snapshot.learning_return_mode, "select_topic")
+        self.assertEqual(snapshot.learning_dialog_session_id, "new-learning-session")
+        self.assertIsNone(snapshot.learning_topic_id)
+        self.assertTrue(snapshot.clear_current_practice_context)
+        self.assertEqual(snapshot.mode, "learning")
+        self.assertFalse(snapshot.command_palette_visible)
+        self.assertEqual(snapshot.last_feedback, LEARNING_ENTRY_FEEDBACK)
+        self.assertTrue(snapshot.should_clear_generated_learning_material)
+        self.assertFalse(snapshot.should_ensure_learning_material)
+
+    def test_build_learning_entry_snapshot_reuses_active_learning_session_and_material(self) -> None:
+        snapshot = build_learning_entry_snapshot(
+            current_mode="loading_learning",
+            current_topic_id=3,
+            session_topic_id=4,
+            has_session=True,
+            current_learning_return_mode="answering",
+            current_learning_dialog_session_id="learn-existing",
+            generated_learning_material="current material",
+            generated_learning_material_topic_id=3,
+            new_dialog_session_id="learn-new",
+        )
+
+        self.assertEqual(snapshot.learning_return_mode, "answering")
+        self.assertEqual(snapshot.learning_dialog_session_id, "learn-existing")
+        self.assertEqual(snapshot.learning_topic_id, 3)
+        self.assertFalse(snapshot.clear_current_practice_context)
+        self.assertFalse(snapshot.should_clear_generated_learning_material)
+        self.assertFalse(snapshot.should_ensure_learning_material)
+
+    def test_build_learning_entry_snapshot_requests_material_for_new_topic(self) -> None:
+        snapshot = build_learning_entry_snapshot(
+            current_mode="answering",
+            current_topic_id=5,
+            session_topic_id=5,
+            has_session=True,
+            current_learning_return_mode="select_topic",
+            current_learning_dialog_session_id=None,
+            generated_learning_material="other topic material",
+            generated_learning_material_topic_id=4,
+            new_dialog_session_id="learn-5",
+        )
+
+        self.assertEqual(snapshot.learning_return_mode, "answering")
+        self.assertEqual(snapshot.learning_dialog_session_id, "learn-5")
+        self.assertEqual(snapshot.learning_topic_id, 5)
+        self.assertFalse(snapshot.clear_current_practice_context)
+        self.assertFalse(snapshot.should_clear_generated_learning_material)
+        self.assertTrue(snapshot.should_ensure_learning_material)
+
+    def test_build_learning_request_snapshot_moves_question_to_loading_state(self) -> None:
+        snapshot = build_learning_request_snapshot(
+            user_message="Объясни descriptor lookup",
+            current_learning_topic_id=3,
+            current_learning_dialog_session_id="learn-existing",
+            new_dialog_session_id="learn-new",
+        )
+
+        self.assertEqual(snapshot.learning_topic_id, 3)
+        self.assertEqual(snapshot.learning_dialog_session_id, "learn-existing")
+        self.assertEqual(snapshot.learning_question, "Объясни descriptor lookup")
+        self.assertEqual(snapshot.learning_pending_message, "Объясни descriptor lookup")
+        self.assertEqual(snapshot.learning_dialog_offset, 0)
+        self.assertFalse(snapshot.command_palette_visible)
+        self.assertEqual(snapshot.mode, "loading_learning")
+        self.assertEqual(snapshot.ollama_status, "разбирает тему...")
+        self.assertEqual(snapshot.last_feedback, "")
+        self.assertEqual(snapshot.history_message, "Готовлю учебное объяснение через Ollama...")
+
+    def test_build_learning_request_snapshot_creates_dialog_session_when_missing(self) -> None:
+        snapshot = build_learning_request_snapshot(
+            user_message="Что такое GIL?",
+            current_learning_topic_id=None,
+            current_learning_dialog_session_id=None,
+            new_dialog_session_id="learn-created",
+        )
+
+        self.assertIsNone(snapshot.learning_topic_id)
+        self.assertEqual(snapshot.learning_dialog_session_id, "learn-created")
+
+    def test_build_learning_finish_snapshot_records_success_reply(self) -> None:
+        snapshot = build_learning_finish_snapshot(
+            explanation="Descriptor управляет доступом к атрибуту.",
+            learning_question="Объясни descriptor lookup",
+            last_error=None,
+        )
+
+        self.assertEqual(snapshot.ollama_status, "ok")
+        self.assertEqual(snapshot.history_message, "Учебный разбор готов.")
+        self.assertEqual(
+            snapshot.transcript_entries,
+            (
+                ("Ты", "Объясни descriptor lookup"),
+                ("ИИ", "Descriptor управляет доступом к атрибуту."),
+            ),
+        )
+        self.assertEqual(snapshot.learning_pending_message, "")
+        self.assertEqual(snapshot.learning_dialog_offset, 0)
+        self.assertEqual(
+            snapshot.last_feedback,
+            "Учебный разбор\nВопрос: Объясни descriptor lookup\n\n"
+            "Descriptor управляет доступом к атрибуту.",
+        )
+        self.assertEqual(snapshot.mode, "learning")
+
+    def test_build_learning_finish_snapshot_records_fallback_without_empty_user_turn(self) -> None:
+        snapshot = build_learning_finish_snapshot(
+            explanation="Fallback разбор.",
+            learning_question="",
+            last_error="timeout",
+        )
+
+        self.assertEqual(snapshot.ollama_status, "fallback")
+        self.assertEqual(snapshot.history_message, "Учебный fallback: timeout")
+        self.assertEqual(snapshot.transcript_entries, (("ИИ", "Fallback разбор."),))
+
+
+class SystemDesignControllerTests(unittest.TestCase):
+    def test_build_system_design_entry_snapshot_saves_practice_context_and_uses_scenario(self) -> None:
+        topic = Topic(
+            id=3,
+            slug="python-runtime",
+            title="Python runtime",
+            description="Runtime internals",
+            level="middle+",
+        )
+        question = Question(
+            id=21,
+            topic_id=3,
+            difficulty="middle+",
+            prompt="Как работает descriptor lookup?",
+            hint="Вспомни __get__.",
+            reference_answer="Descriptor участвует в поиске атрибутов.",
+            source="test",
+        )
+        answer = Answer(
+            id=11,
+            session_id=7,
+            question_id=21,
+            user_answer="Черновик ответа.",
+            self_score=None,
+            ai_feedback=None,
+            answered_at=datetime(2026, 5, 22, 10, 0, 0),
+        )
+
+        snapshot = build_system_design_entry_snapshot(
+            current_mode="answering",
+            current_topic=topic,
+            current_question=question,
+            current_answer=answer,
+            current_pending_answer="pending",
+            current_showing_hint=True,
+            current_showing_reference=True,
+            current_system_design_return_mode="select_topic",
+            current_system_design_saved_topic=None,
+            current_system_design_saved_question=None,
+            current_system_design_saved_answer=None,
+            current_system_design_saved_pending_answer=None,
+            current_system_design_saved_showing_hint=False,
+            current_system_design_saved_showing_reference=False,
+            current_system_design_scenario=DEFAULT_SYSTEM_DESIGN_SCENARIO,
+            current_system_design_scenario_id=None,
+            current_system_design_transcript=[("Кандидат", "old")],
+            scenario="Спроектируй notification service.",
+            scenario_id=42,
+        )
+
+        self.assertEqual(snapshot.system_design_return_mode, "answering")
+        self.assertIs(snapshot.system_design_saved_topic, topic)
+        self.assertIs(snapshot.system_design_saved_question, question)
+        self.assertIs(snapshot.system_design_saved_answer, answer)
+        self.assertEqual(snapshot.system_design_saved_pending_answer, "pending")
+        self.assertTrue(snapshot.system_design_saved_showing_hint)
+        self.assertTrue(snapshot.system_design_saved_showing_reference)
+        self.assertEqual(snapshot.system_design_scenario, "Спроектируй notification service.")
+        self.assertEqual(snapshot.system_design_scenario_id, 42)
+        self.assertEqual(snapshot.system_design_transcript, ())
+        self.assertTrue(snapshot.should_reset_artifacts)
+        self.assertFalse(snapshot.showing_hint)
+        self.assertFalse(snapshot.showing_reference)
+        self.assertEqual(snapshot.mode, "system_design")
+        self.assertEqual(snapshot.last_feedback, SYSTEM_DESIGN_ENTRY_FEEDBACK)
+
+    def test_build_system_design_entry_snapshot_preserves_saved_context_while_already_focused(self) -> None:
+        saved_topic = Topic(
+            id=5,
+            slug="databases",
+            title="Databases",
+            description="Transactions",
+            level="middle+",
+        )
+        transcript = [("Кандидат", "Начал с requirements."), ("Интервьюер", "Что с API?")]
+
+        snapshot = build_system_design_entry_snapshot(
+            current_mode="loading_system_design_checkpoint",
+            current_topic=None,
+            current_question=None,
+            current_answer=None,
+            current_pending_answer=None,
+            current_showing_hint=False,
+            current_showing_reference=False,
+            current_system_design_return_mode="answered",
+            current_system_design_saved_topic=saved_topic,
+            current_system_design_saved_question=None,
+            current_system_design_saved_answer=None,
+            current_system_design_saved_pending_answer="saved pending",
+            current_system_design_saved_showing_hint=True,
+            current_system_design_saved_showing_reference=False,
+            current_system_design_scenario="Existing scenario",
+            current_system_design_scenario_id=9,
+            current_system_design_transcript=transcript,
+            scenario="",
+            scenario_id=None,
+        )
+
+        self.assertEqual(snapshot.system_design_return_mode, "answered")
+        self.assertIs(snapshot.system_design_saved_topic, saved_topic)
+        self.assertEqual(snapshot.system_design_saved_pending_answer, "saved pending")
+        self.assertTrue(snapshot.system_design_saved_showing_hint)
+        self.assertEqual(snapshot.system_design_scenario, "Existing scenario")
+        self.assertEqual(snapshot.system_design_scenario_id, 9)
+        self.assertEqual(snapshot.system_design_transcript, tuple(transcript))
+        self.assertFalse(snapshot.should_reset_artifacts)
+
+    def test_build_system_design_entry_snapshot_defaults_empty_fresh_transcript(self) -> None:
+        snapshot = build_system_design_entry_snapshot(
+            current_mode="select_topic",
+            current_topic=None,
+            current_question=None,
+            current_answer=None,
+            current_pending_answer=None,
+            current_showing_hint=False,
+            current_showing_reference=False,
+            current_system_design_return_mode="answering",
+            current_system_design_saved_topic=None,
+            current_system_design_saved_question=None,
+            current_system_design_saved_answer=None,
+            current_system_design_saved_pending_answer=None,
+            current_system_design_saved_showing_hint=False,
+            current_system_design_saved_showing_reference=False,
+            current_system_design_scenario="Stale scenario",
+            current_system_design_scenario_id=8,
+            current_system_design_transcript=[],
+            scenario="",
+            scenario_id=None,
+        )
+
+        self.assertEqual(snapshot.system_design_scenario, DEFAULT_SYSTEM_DESIGN_SCENARIO)
+        self.assertIsNone(snapshot.system_design_scenario_id)
+        self.assertEqual(snapshot.system_design_transcript, ())
 
 
 class TUITests(unittest.IsolatedAsyncioTestCase):

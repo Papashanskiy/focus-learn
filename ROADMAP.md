@@ -50,6 +50,10 @@
 
 ## Done
 
+- [x] TUI refactor: system-design entry state snapshot вынесен в pure controller helper с тестами без Textual harness.
+- [x] TUI refactor: learning finish transition snapshot вынесен в pure controller helper с тестами без Textual harness.
+- [x] TUI refactor: learning request/loading transition snapshot вынесен в pure controller helper с тестами без Textual harness.
+- [x] TUI refactor: learning entry state snapshot для входа в `/learn` вынесен в pure controller helper с тестами без Textual harness.
 - [x] TUI refactor: practice start/reset session state snapshots вынесены в pure controller helpers без Textual harness.
 - [x] TUI refactor: practice submit-routing для `select_topic`/`answering`/`scoring`/`answered` вынесен в pure helper с тестами без Textual harness.
 - [x] TUI refactor: pure render helpers вынесены из `ui/tui.py` в отдельный модуль без изменения поведения.
@@ -498,8 +502,15 @@
   - [x] Practice controller: вынести submit-routing для `select_topic`/`answering`/`scoring`/`answered` в pure helper без Textual harness.
   - [x] Practice controller: вынести reset/start-session state snapshot для новой practice session без изменения UI side effects.
   - [x] Practice controller: вынести answer -> scoring -> answered transition contract с тестами на self-score/next-question flow.
-- [ ] TUI refactor: вынести learning-mode state transitions в отдельный controller/service с тестами без Textual harness.
+- [x] TUI refactor: вынести learning-mode state transitions в отдельный controller/service с тестами без Textual harness.
+  - [x] Learning controller: вынести entry state snapshot для входа в `/learn` без изменения UI/storage side effects.
+  - [x] Learning controller: вынести request/loading transition snapshot для отправки учебного вопроса.
+  - [x] Learning controller: вынести finish-learning transition contract для ответа ИИ, transcript и fallback status.
 - [ ] TUI refactor: вынести system-design state transitions в отдельный controller/service с тестами без Textual harness.
+  - [x] System design controller: вынести entry state snapshot для входа в `/system-design` без изменения UI/storage side effects.
+  - [ ] System design controller: вынести request/loading transition для кандидатского turn.
+  - [ ] System design controller: вынести finish-turn transition contract для interviewer reply, transcript и fallback status.
+  - [ ] System design controller: вынести checkpoint/pressure/final-feedback loading и finish transitions.
 - [ ] TUI refactor: вынести content worker orchestration из `InterviewPrepTUI` в отдельный класс.
 - [ ] TUI stability: исправить RuntimeWarning `call_from_thread` в тестах background worker/system design flow.
 - [ ] TUI stability: добавить regression-тест, что TUI unmount не оставляет running worker state.
