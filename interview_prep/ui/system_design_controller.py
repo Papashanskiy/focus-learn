@@ -45,6 +45,55 @@ class SystemDesignEntrySnapshot:
     last_feedback: str
 
 
+@dataclass(frozen=True)
+class SystemDesignRequestSnapshot:
+    system_design_pending_message: str
+    mode: Literal["loading_system_design"]
+    ollama_status: str
+    last_feedback: str
+    history_message: str
+
+
+@dataclass(frozen=True)
+class SystemDesignFinishTurnSnapshot:
+    transcript_entries: tuple[tuple[str, str], ...]
+    system_design_pending_message: str
+    ollama_status: str
+    last_feedback: str
+    history_message: str
+    mode: Literal["system_design"]
+
+
+@dataclass(frozen=True)
+class SystemDesignLoadingSnapshot:
+    mode: Literal[
+        "loading_system_design_checkpoint",
+        "loading_system_design_pressure",
+        "loading_system_design_feedback",
+    ]
+    ollama_status: str
+    last_feedback: str
+    history_message: str
+
+
+@dataclass(frozen=True)
+class SystemDesignAuxiliaryFinishSnapshot:
+    transcript_entries: tuple[tuple[str, str], ...]
+    ollama_status: str
+    last_feedback: str
+    history_message: str
+    mode: Literal["system_design"]
+
+
+@dataclass(frozen=True)
+class SystemDesignFeedbackFinishSnapshot:
+    ollama_status: str
+    last_feedback: str
+    history_message: str
+    source: Literal["llm", "fallback"]
+    mode: Literal["system_design"]
+
+
 def build_system_design_entry_snapshot(
     *,
     current_mode: str,
@@ -117,4 +166,124 @@ def build_system_design_entry_snapshot(
         showing_reference=False,
         mode="system_design",
         last_feedback=SYSTEM_DESIGN_ENTRY_FEEDBACK,
+    )
+
+
+def build_system_design_request_snapshot(user_message: str) -> SystemDesignRequestSnapshot:
+    """State values for a candidate turn while the interviewer response is loading."""
+    return SystemDesignRequestSnapshot(
+        system_design_pending_message=user_message,
+        mode="loading_system_design",
+        ollama_status="system design interviewer...",
+        last_feedback="Интервьюер готовит следующий вопрос...",
+        history_message="System design interviewer думает над следующим вопросом...",
+    )
+
+
+def build_system_design_finish_turn_snapshot(
+    *,
+    user_message: str,
+    response: str,
+    last_error: str | None,
+) -> SystemDesignFinishTurnSnapshot:
+    """State values after an interviewer reply arrives, before storage side effects."""
+    transcript_entries = (
+        (("Кандидат", user_message), ("Интервьюер", response))
+        if user_message
+        else (("Интервьюер", response),)
+    )
+    return SystemDesignFinishTurnSnapshot(
+        transcript_entries=transcript_entries,
+        system_design_pending_message="",
+        ollama_status="fallback" if last_error else "ok",
+        last_feedback=response,
+        history_message=f"System design fallback: {last_error}" if last_error else "Интервьюер ответил.",
+        mode="system_design",
+    )
+
+
+def build_system_design_checkpoint_loading_snapshot() -> SystemDesignLoadingSnapshot:
+    """State values while checkpoint generation is running."""
+    return SystemDesignLoadingSnapshot(
+        mode="loading_system_design_checkpoint",
+        ollama_status="system design checkpoint...",
+        last_feedback="Готовлю короткий system design checkpoint...",
+        history_message="System design interviewer готовит checkpoint без финальной оценки...",
+    )
+
+
+def build_system_design_checkpoint_finish_snapshot(
+    *,
+    checkpoint: str,
+    last_error: str | None,
+) -> SystemDesignAuxiliaryFinishSnapshot:
+    """State values after a checkpoint reply arrives, before storage side effects."""
+    return SystemDesignAuxiliaryFinishSnapshot(
+        transcript_entries=(("Интервьюер", checkpoint),),
+        ollama_status="fallback" if last_error else "ok",
+        last_feedback=f"System design checkpoint\n\n{checkpoint}",
+        history_message=(
+            f"System design checkpoint fallback: {last_error}"
+            if last_error
+            else "System design checkpoint готов."
+        ),
+        mode="system_design",
+    )
+
+
+def build_system_design_pressure_loading_snapshot() -> SystemDesignLoadingSnapshot:
+    """State values while pressure follow-up generation is running."""
+    return SystemDesignLoadingSnapshot(
+        mode="loading_system_design_pressure",
+        ollama_status="system design pressure...",
+        last_feedback="Готовлю pressure follow-up question...",
+        history_message="System design interviewer готовит pressure follow-up question...",
+    )
+
+
+def build_system_design_pressure_finish_snapshot(
+    *,
+    pressure: str,
+    last_error: str | None,
+) -> SystemDesignAuxiliaryFinishSnapshot:
+    """State values after a pressure follow-up arrives, before storage side effects."""
+    return SystemDesignAuxiliaryFinishSnapshot(
+        transcript_entries=(("Интервьюер", pressure),),
+        ollama_status="fallback" if last_error else "ok",
+        last_feedback=f"System design pressure follow-up\n\n{pressure}",
+        history_message=(
+            f"System design pressure follow-up fallback: {last_error}"
+            if last_error
+            else "System design pressure follow-up готов."
+        ),
+        mode="system_design",
+    )
+
+
+def build_system_design_feedback_loading_snapshot() -> SystemDesignLoadingSnapshot:
+    """State values while final system design feedback is running."""
+    return SystemDesignLoadingSnapshot(
+        mode="loading_system_design_feedback",
+        ollama_status="оценивает system design...",
+        last_feedback="Готовлю итоговый system design feedback...",
+        history_message="Генерирую итоговый feedback по system design mock interview...",
+    )
+
+
+def build_system_design_feedback_finish_snapshot(
+    *,
+    feedback: str,
+    last_error: str | None,
+) -> SystemDesignFeedbackFinishSnapshot:
+    """State values after final system design feedback arrives, before storage side effects."""
+    return SystemDesignFeedbackFinishSnapshot(
+        ollama_status="fallback" if last_error else "ok",
+        last_feedback=f"Итоговый system design feedback\n\n{feedback}",
+        history_message=(
+            f"System design feedback fallback: {last_error}"
+            if last_error
+            else "Итоговый system design feedback готов."
+        ),
+        source="fallback" if last_error else "llm",
+        mode="system_design",
     )

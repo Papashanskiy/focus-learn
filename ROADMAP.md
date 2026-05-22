@@ -51,6 +51,11 @@
 ## Done
 
 - [x] TUI refactor: system-design entry state snapshot вынесен в pure controller helper с тестами без Textual harness.
+- [x] TUI refactor: content worker finish/result status transition вынесен в `ContentWorkerOrchestrator` без изменения artifact side effects.
+- [x] TUI refactor: content worker loop/process-next-job orchestration вынесен в `ContentWorkerOrchestrator` без изменения TUI thread handoff.
+- [x] TUI refactor: content worker state/pause/resume/start guard вынесены в отдельный orchestration class без изменения worker thread/result side effects.
+- [x] TUI refactor: system-design checkpoint/pressure/final-feedback transitions вынесены в pure controller helpers с тестами без Textual harness.
+- [x] TUI refactor: system-design finish-turn transition snapshot вынесен в pure controller helper с тестами без Textual harness.
 - [x] TUI refactor: learning finish transition snapshot вынесен в pure controller helper с тестами без Textual harness.
 - [x] TUI refactor: learning request/loading transition snapshot вынесен в pure controller helper с тестами без Textual harness.
 - [x] TUI refactor: learning entry state snapshot для входа в `/learn` вынесен в pure controller helper с тестами без Textual harness.
@@ -506,15 +511,18 @@
   - [x] Learning controller: вынести entry state snapshot для входа в `/learn` без изменения UI/storage side effects.
   - [x] Learning controller: вынести request/loading transition snapshot для отправки учебного вопроса.
   - [x] Learning controller: вынести finish-learning transition contract для ответа ИИ, transcript и fallback status.
-- [ ] TUI refactor: вынести system-design state transitions в отдельный controller/service с тестами без Textual harness.
+- [x] TUI refactor: вынести system-design state transitions в отдельный controller/service с тестами без Textual harness.
   - [x] System design controller: вынести entry state snapshot для входа в `/system-design` без изменения UI/storage side effects.
-  - [ ] System design controller: вынести request/loading transition для кандидатского turn.
-  - [ ] System design controller: вынести finish-turn transition contract для interviewer reply, transcript и fallback status.
-  - [ ] System design controller: вынести checkpoint/pressure/final-feedback loading и finish transitions.
-- [ ] TUI refactor: вынести content worker orchestration из `InterviewPrepTUI` в отдельный класс.
-- [ ] TUI stability: исправить RuntimeWarning `call_from_thread` в тестах background worker/system design flow.
-- [ ] TUI stability: добавить regression-тест, что TUI unmount не оставляет running worker state.
-- [ ] TUI stability: добавить smoke test для переключения Today -> Practice -> Learn -> System Design -> Readiness -> Practice.
+  - [x] System design controller: вынести request/loading transition для кандидатского turn.
+  - [x] System design controller: вынести finish-turn transition contract для interviewer reply, transcript и fallback status.
+  - [x] System design controller: вынести checkpoint/pressure/final-feedback loading и finish transitions.
+- [x] TUI refactor: вынести content worker orchestration из `InterviewPrepTUI` в отдельный класс.
+  - [x] Content worker controller: вынести status/running/paused state и pause/resume/start guard в отдельный orchestration class без изменения thread/result side effects.
+  - [x] Content worker controller: вынести worker loop/process-next-job orchestration из `start_background_content_worker()`.
+  - [x] Content worker controller: вынести finish/result status transition из `finish_background_content_worker()`.
+- [x] TUI stability: исправить RuntimeWarning `call_from_thread` в тестах background worker/system design flow.
+- [x] TUI stability: добавить regression-тест, что TUI unmount не оставляет running worker state.
+- [x] TUI stability: добавить smoke test для переключения Today -> Practice -> Learn -> System Design -> Readiness -> Practice.
 - [ ] TUI refactor: обновить `ROADMAP.md` и `DEVELOPMENT_LOG.md` после каждого выделения модуля, чтобы не терять поведенческий контракт.
 
 ### 19. Web/API foundations for future UI

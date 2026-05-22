@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime, timedelta
-from typing import Literal
+from typing import Callable, Literal
 from uuid import uuid4
 
 from rich.markup import escape
@@ -41,6 +41,7 @@ from interview_prep.services.content_generation_service import (
 from interview_prep.services.curriculum_service import TopicRecommendation
 from interview_prep.services.session_service import FeedbackQuality
 from interview_prep.services.system_design_service import DEFAULT_SYSTEM_DESIGN_SCENARIO
+from interview_prep.ui.content_worker_controller import ContentWorkerOrchestrator
 from interview_prep.ui.learning_controller import (
     LearningEntrySnapshot,
     LearningFinishSnapshot,
@@ -65,8 +66,21 @@ from interview_prep.ui.practice_controller import (
     parse_practice_self_score,
 )
 from interview_prep.ui.system_design_controller import (
+    SystemDesignAuxiliaryFinishSnapshot,
     SystemDesignEntrySnapshot,
+    SystemDesignFeedbackFinishSnapshot,
+    SystemDesignFinishTurnSnapshot,
+    SystemDesignLoadingSnapshot,
+    SystemDesignRequestSnapshot,
+    build_system_design_checkpoint_finish_snapshot,
+    build_system_design_checkpoint_loading_snapshot,
     build_system_design_entry_snapshot,
+    build_system_design_feedback_finish_snapshot,
+    build_system_design_feedback_loading_snapshot,
+    build_system_design_finish_turn_snapshot,
+    build_system_design_pressure_finish_snapshot,
+    build_system_design_pressure_loading_snapshot,
+    build_system_design_request_snapshot,
 )
 from interview_prep.ui.tui_render import (
     NOTES_DRAFT_CONTEXT_TYPE,
@@ -295,6 +309,7 @@ class InterviewPrepTUI(App[None]):
         self.showing_hint = False
         self.showing_reference = False
         self.ollama_status = "не проверялась"
+        self.content_worker = ContentWorkerOrchestrator()
         self.content_status = "idle"
         self.content_worker_running = False
         self.content_worker_paused = False
@@ -354,6 +369,37 @@ class InterviewPrepTUI(App[None]):
         self._notes_editor_widget: TextArea | None = None
         self._notes_editor_text_cache = ""
 
+    @property
+    def content_status(self) -> str:
+        return self.content_worker.status
+
+    @content_status.setter
+    def content_status(self, value: str) -> None:
+        self.content_worker.status = value
+
+    @property
+    def content_worker_running(self) -> bool:
+        return self.content_worker.running
+
+    @content_worker_running.setter
+    def content_worker_running(self, value: bool) -> None:
+        self.content_worker.running = value
+
+    @property
+    def content_worker_paused(self) -> bool:
+        return self.content_worker.paused
+
+    @content_worker_paused.setter
+    def content_worker_paused(self, value: bool) -> None:
+        self.content_worker.paused = value
+
+    def dispatch_from_worker_thread(self, callback: Callable[..., None], *args: object) -> None:
+        """Queue a UI callback from a background thread without waiting on the app loop."""
+        try:
+            self.call_later(callback, *args)
+        except RuntimeError:
+            return
+
     def compose(self) -> ComposeResult:
         yield Static("", id="topbar")
         with Horizontal(id="mode_actions"):
@@ -400,6 +446,7 @@ class InterviewPrepTUI(App[None]):
         self.query_one("#input_bar", Composer).focus()
 
     def on_unmount(self) -> None:
+        self.content_worker.mark_unmounted()
         self.persist_notes_draft()
         self.finish_session_if_needed()
         self.services.close()
@@ -1192,26 +1239,18 @@ class InterviewPrepTUI(App[None]):
         self.start_background_content_worker()
 
     def pause_content_worker(self) -> None:
-        if self.content_worker_paused:
-            self.add_history("TUI content worker уже на паузе; queued jobs сохранены.")
-            self.render_all()
-            return
-        self.content_worker_paused = True
-        self.content_status = "paused"
-        if self.content_worker_running:
-            self.add_history("TUI content worker поставлен на паузу после текущей running-задачи.")
-        else:
-            self.add_history("TUI content worker поставлен на паузу; queued jobs сохранены.")
+        action = self.content_worker.pause()
+        if action.history_message:
+            self.add_history(action.history_message)
         self.render_all()
 
     def resume_content_worker(self) -> None:
-        if not self.content_worker_paused:
-            self.add_history("TUI content worker уже активен.")
+        action = self.content_worker.resume()
+        if action.history_message:
+            self.add_history(action.history_message)
+        if not action.should_start_thread:
             self.render_all()
             return
-        self.content_worker_paused = False
-        self.content_status = "idle"
-        self.add_history("TUI content worker возобновлен.")
         self.start_background_content_worker()
 
     def questions_review_command(self, raw_args: str) -> None:
@@ -2033,55 +2072,44 @@ class InterviewPrepTUI(App[None]):
         self.start_background_content_worker()
 
     def start_background_content_worker(self) -> None:
-        if self.content_worker_paused:
-            self.content_status = "paused"
-            if not self.history or self.history[-1] != "TUI content worker на паузе; queued jobs сохранены.":
-                self.add_history("TUI content worker на паузе; queued jobs сохранены.")
-            self.render_all()
+        action = self.content_worker.request_start(
+            paused_message_already_visible=bool(
+                self.history and self.history[-1] == "TUI content worker на паузе; queued jobs сохранены."
+            )
+        )
+        if action.history_message:
+            self.add_history(action.history_message)
+        if not action.should_start_thread:
+            if action.should_render:
+                self.render_all()
             return
-        if self.content_worker_running:
-            return
-        self.content_worker_running = True
-        self.content_status = "generating..."
         self.render_all()
 
         def work() -> None:
             services = AppServices(self.db_path, self.config_path)
-            results = []
-            last_error = None
             try:
-                for _ in range(3):
-                    result = services.content_generation.process_next_job()
-                    if result is None:
-                        break
-                    results.append(result)
-                    last_error = getattr(services.llm, "last_error", None)
-            except Exception as exc:
-                last_error = str(exc)
+                run = self.content_worker.process_available_jobs(
+                    services.content_generation,
+                    services.llm,
+                )
             finally:
                 services.close()
-            try:
-                self.call_from_thread(self.finish_background_content_worker, results, last_error)
-            except Exception:
-                return
+            self.dispatch_from_worker_thread(
+                self.finish_background_content_worker,
+                list(run.results),
+                run.last_error,
+            )
 
         threading.Thread(target=work, daemon=True).start()
 
     def finish_background_content_worker(self, result, last_error: str | None) -> None:
-        self.content_worker_running = False
-        results = result if isinstance(result, list) else ([] if result is None else [result])
-        if not results:
-            self.content_status = "idle"
-            self.add_history("Автогенерация контента: задач в очереди нет.")
+        finish = self.content_worker.finish_run(result)
+        if finish.history_message:
+            self.add_history(finish.history_message)
         else:
-            for item in results:
+            for item in finish.results:
                 self.apply_background_content_result(item, last_error)
-            if any(item.job.status == "failed" for item in results):
-                self.content_status = "failed"
-            else:
-                self.content_status = f"done {len(results)} job(s)"
-        if self.content_worker_paused:
-            self.content_status = "paused"
+            self.content_status = finish.status
         self.render_all()
 
     def apply_background_content_result(self, result, last_error: str | None) -> None:
@@ -2232,11 +2260,8 @@ class InterviewPrepTUI(App[None]):
         self.render_all()
 
     def request_system_design_turn(self, user_message: str) -> None:
-        self.system_design_pending_message = user_message
-        self.mode = "loading_system_design"
-        self.ollama_status = "system design interviewer..."
-        self.last_feedback = "Интервьюер готовит следующий вопрос..."
-        self.add_history("System design interviewer думает над следующим вопросом...")
+        snapshot = build_system_design_request_snapshot(user_message)
+        self.apply_system_design_request_snapshot(snapshot)
         self.render_all()
 
         def work() -> None:
@@ -2253,24 +2278,40 @@ class InterviewPrepTUI(App[None]):
                     "Какие non-functional requirements ты считаешь ключевыми?"
                 )
                 last_error = str(exc)
-            self.call_from_thread(self.finish_system_design_turn, user_message, response, last_error)
+            self.dispatch_from_worker_thread(
+                self.finish_system_design_turn,
+                user_message,
+                response,
+                last_error,
+            )
 
         threading.Thread(target=work, daemon=True).start()
 
+    def apply_system_design_request_snapshot(self, snapshot: SystemDesignRequestSnapshot) -> None:
+        self.system_design_pending_message = snapshot.system_design_pending_message
+        self.mode = snapshot.mode
+        self.ollama_status = snapshot.ollama_status
+        self.last_feedback = snapshot.last_feedback
+        self.add_history(snapshot.history_message)
+
     def finish_system_design_turn(self, user_message: str, response: str, last_error: str | None) -> None:
-        self.system_design_transcript.append(("Кандидат", user_message))
-        self.system_design_transcript.append(("Интервьюер", response))
+        snapshot = build_system_design_finish_turn_snapshot(
+            user_message=user_message,
+            response=response,
+            last_error=last_error,
+        )
+        self.apply_system_design_finish_turn_snapshot(snapshot)
         self.save_system_design_transcript_turn(user_message, response)
         self.save_system_design_artifacts_from_transcript(user_message)
-        self.system_design_pending_message = ""
-        self.ollama_status = "fallback" if last_error else "ok"
-        self.last_feedback = response
-        if last_error:
-            self.add_history(f"System design fallback: {last_error}")
-        else:
-            self.add_history("Интервьюер ответил.")
-        self.mode = "system_design"
+        self.add_history(snapshot.history_message)
         self.render_all()
+
+    def apply_system_design_finish_turn_snapshot(self, snapshot: SystemDesignFinishTurnSnapshot) -> None:
+        self.system_design_transcript.extend(snapshot.transcript_entries)
+        self.system_design_pending_message = snapshot.system_design_pending_message
+        self.ollama_status = snapshot.ollama_status
+        self.last_feedback = snapshot.last_feedback
+        self.mode = snapshot.mode
 
     def save_system_design_transcript_turn(self, user_message: str, response: str) -> None:
         topic_id = self.system_design_topic_id()
@@ -2312,10 +2353,8 @@ class InterviewPrepTUI(App[None]):
             self.add_history("Сначала добавь часть решения или artifact перед /sd-checkpoint.")
             self.render_all()
             return
-        self.mode = "loading_system_design_checkpoint"
-        self.ollama_status = "system design checkpoint..."
-        self.last_feedback = "Готовлю короткий system design checkpoint..."
-        self.add_history("System design interviewer готовит checkpoint без финальной оценки...")
+        snapshot = build_system_design_checkpoint_loading_snapshot()
+        self.apply_system_design_loading_snapshot(snapshot)
         self.render_all()
 
         def work() -> None:
@@ -2335,20 +2374,22 @@ class InterviewPrepTUI(App[None]):
                     "Вопрос интервьюера: какой самый важный tradeoff ты хочешь закрыть дальше?"
                 )
                 last_error = str(exc)
-            self.call_from_thread(self.finish_system_design_checkpoint, checkpoint, last_error)
+            self.dispatch_from_worker_thread(
+                self.finish_system_design_checkpoint,
+                checkpoint,
+                last_error,
+            )
 
         threading.Thread(target=work, daemon=True).start()
 
     def finish_system_design_checkpoint(self, checkpoint: str, last_error: str | None) -> None:
-        self.system_design_transcript.append(("Интервьюер", checkpoint))
+        snapshot = build_system_design_checkpoint_finish_snapshot(
+            checkpoint=checkpoint,
+            last_error=last_error,
+        )
+        self.apply_system_design_auxiliary_finish_snapshot(snapshot)
         self.save_system_design_checkpoint(checkpoint)
-        self.ollama_status = "fallback" if last_error else "ok"
-        self.last_feedback = f"System design checkpoint\n\n{checkpoint}"
-        if last_error:
-            self.add_history(f"System design checkpoint fallback: {last_error}")
-        else:
-            self.add_history("System design checkpoint готов.")
-        self.mode = "system_design"
+        self.add_history(snapshot.history_message)
         self.render_all()
 
     def save_system_design_checkpoint(self, checkpoint: str) -> None:
@@ -2384,10 +2425,8 @@ class InterviewPrepTUI(App[None]):
             self.add_history("Сначала добавь часть решения или artifact перед /sd-pressure.")
             self.render_all()
             return
-        self.mode = "loading_system_design_pressure"
-        self.ollama_status = "system design pressure..."
-        self.last_feedback = "Готовлю pressure follow-up question..."
-        self.add_history("System design interviewer готовит pressure follow-up question...")
+        snapshot = build_system_design_pressure_loading_snapshot()
+        self.apply_system_design_loading_snapshot(snapshot)
         self.render_all()
 
         def work() -> None:
@@ -2406,20 +2445,22 @@ class InterviewPrepTUI(App[None]):
                     "Question: как ты задашь idempotency key, retry policy и DLQ для этого flow?"
                 )
                 last_error = str(exc)
-            self.call_from_thread(self.finish_system_design_pressure, pressure, last_error)
+            self.dispatch_from_worker_thread(
+                self.finish_system_design_pressure,
+                pressure,
+                last_error,
+            )
 
         threading.Thread(target=work, daemon=True).start()
 
     def finish_system_design_pressure(self, pressure: str, last_error: str | None) -> None:
-        self.system_design_transcript.append(("Интервьюер", pressure))
+        snapshot = build_system_design_pressure_finish_snapshot(
+            pressure=pressure,
+            last_error=last_error,
+        )
+        self.apply_system_design_auxiliary_finish_snapshot(snapshot)
         self.save_system_design_pressure(pressure)
-        self.ollama_status = "fallback" if last_error else "ok"
-        self.last_feedback = f"System design pressure follow-up\n\n{pressure}"
-        if last_error:
-            self.add_history(f"System design pressure follow-up fallback: {last_error}")
-        else:
-            self.add_history("System design pressure follow-up готов.")
-        self.mode = "system_design"
+        self.add_history(snapshot.history_message)
         self.render_all()
 
     def save_system_design_pressure(self, pressure: str) -> None:
@@ -2449,10 +2490,8 @@ class InterviewPrepTUI(App[None]):
         if missing_sections:
             labels = ", ".join(SYSTEM_DESIGN_ARTIFACT_LABELS[section] for section in missing_sections)
             self.add_history(f"Перед /sd-feedback пустые system design секции: {labels}.")
-        self.mode = "loading_system_design_feedback"
-        self.ollama_status = "оценивает system design..."
-        self.last_feedback = "Готовлю итоговый system design feedback..."
-        self.add_history("Генерирую итоговый feedback по system design mock interview...")
+        snapshot = build_system_design_feedback_loading_snapshot()
+        self.apply_system_design_loading_snapshot(snapshot)
         self.render_all()
 
         def work() -> None:
@@ -2468,20 +2507,46 @@ class InterviewPrepTUI(App[None]):
                     "storage, scaling, consistency, observability и failure modes."
                 )
                 last_error = str(exc)
-            self.call_from_thread(self.finish_system_design_feedback, feedback, last_error)
+            self.dispatch_from_worker_thread(
+                self.finish_system_design_feedback,
+                feedback,
+                last_error,
+            )
 
         threading.Thread(target=work, daemon=True).start()
 
     def finish_system_design_feedback(self, feedback: str, last_error: str | None) -> None:
-        self.ollama_status = "fallback" if last_error else "ok"
-        self.last_feedback = f"Итоговый system design feedback\n\n{feedback}"
-        self.save_system_design_final_feedback(feedback, source="fallback" if last_error else "llm")
-        if last_error:
-            self.add_history(f"System design feedback fallback: {last_error}")
-        else:
-            self.add_history("Итоговый system design feedback готов.")
-        self.mode = "system_design"
+        snapshot = build_system_design_feedback_finish_snapshot(
+            feedback=feedback,
+            last_error=last_error,
+        )
+        self.apply_system_design_feedback_finish_snapshot(snapshot)
+        self.save_system_design_final_feedback(feedback, source=snapshot.source)
+        self.add_history(snapshot.history_message)
         self.render_all()
+
+    def apply_system_design_loading_snapshot(self, snapshot: SystemDesignLoadingSnapshot) -> None:
+        self.mode = snapshot.mode
+        self.ollama_status = snapshot.ollama_status
+        self.last_feedback = snapshot.last_feedback
+        self.add_history(snapshot.history_message)
+
+    def apply_system_design_auxiliary_finish_snapshot(
+        self,
+        snapshot: SystemDesignAuxiliaryFinishSnapshot,
+    ) -> None:
+        self.system_design_transcript.extend(snapshot.transcript_entries)
+        self.ollama_status = snapshot.ollama_status
+        self.last_feedback = snapshot.last_feedback
+        self.mode = snapshot.mode
+
+    def apply_system_design_feedback_finish_snapshot(
+        self,
+        snapshot: SystemDesignFeedbackFinishSnapshot,
+    ) -> None:
+        self.ollama_status = snapshot.ollama_status
+        self.last_feedback = snapshot.last_feedback
+        self.mode = snapshot.mode
 
     def save_system_design_final_feedback(self, feedback: str, source: str) -> None:
         topic_id = self.system_design_topic_id()

@@ -2,6 +2,63 @@
 
 ## 2026-05-22
 
+### TUI mode chain smoke regression
+
+- Закрыт roadmap leaf про smoke test переключения `Today -> Practice -> Learn -> System Design -> Readiness -> Practice`: добавлен TUI regression-тест, который стартует baseline practice из Today, проходит через learning/system design/readiness и возвращается в исходную practice session.
+- Тест фиксирует поддержанный mixed navigation contract: mode action buttons для Practice/Learn/System Design, slash-command `/readiness` из focused mode и возврат в practice через Practice action.
+- Проверки: `.venv/bin/python -m unittest tests.test_tui.TUITests.test_tui_smoke_switches_today_practice_learn_system_design_readiness_practice tests.test_tui.TUITests.test_tui_clicking_mode_actions_switches_main_workflows tests.test_tui.TUITests.test_tui_clicking_mode_actions_before_topic_does_not_stick_in_learning -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### TUI content worker unmount stability
+
+- Закрыт roadmap leaf про regression-тест TUI unmount: `ContentWorkerOrchestrator.mark_unmounted()` теперь сбрасывает stale running state, если приложение закрывается до завершения background callback.
+- `InterviewPrepTUI.on_unmount()` вызывает этот teardown hook перед сохранением notes/session close, чтобы следующий render/status snapshot не оставался в `generating...`.
+- Проверки: `.venv/bin/python -m unittest tests.test_tui.ContentWorkerControllerTests tests.test_tui.TUITests.test_tui_unmount_clears_running_content_worker_state tests.test_tui.TUITests.test_tui_unmount_persists_notes_draft_across_database_reopen -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### TUI worker thread callback stability
+
+- Закрыт roadmap leaf про RuntimeWarning `call_from_thread`: background content worker и system design async flows теперь возвращают результат в Textual через queued `call_later`, не блокируя worker thread на app loop.
+- Это сохраняет прежний finish/render contract, но избегает unawaited coroutine warning, когда TUI test teardown пересекается с завершением background thread.
+- Проверки: `.venv/bin/python -W error::RuntimeWarning -m unittest tests.test_tui.ContentWorkerControllerTests tests.test_tui.SystemDesignControllerTests tests.test_tui.TUITests.test_tui_auto_queues_system_design_scenario_when_entering_mode tests.test_tui.TUITests.test_tui_system_design_mode_runs_interviewer_flow_without_saving_answer tests.test_tui.TUITests.test_tui_generate_curriculum_command_queues_job_and_starts_worker tests.test_tui.TUITests.test_tui_content_screen_lists_service_jobs tests.test_tui.TUITests.test_tui_content_screen_retries_failed_job -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### TUI content worker finish transition
+
+- Закрыт roadmap leaf про finish/result status transition: `ContentWorkerOrchestrator.finish_run()` теперь нормализует result payload, сбрасывает running state и выбирает итоговый status для empty/done/failed/paused outcomes.
+- `InterviewPrepTUI.finish_background_content_worker()` оставляет artifact-specific side effects в `apply_background_content_result()`, но финальный worker status берет из controller snapshot.
+- Родительский roadmap item про content worker orchestration закрыт, потому что все выделенные controller leaf завершены.
+- Проверки: `.venv/bin/python -m unittest tests.test_tui.ContentWorkerControllerTests tests.test_tui.TUITests.test_tui_content_screen_lists_service_jobs tests.test_tui.TUITests.test_tui_content_screen_pauses_and_resumes_worker_without_deleting_jobs tests.test_tui.TUITests.test_tui_content_screen_retries_failed_job -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### TUI content worker loop orchestration
+
+- Закрыт roadmap leaf про worker loop/process-next-job orchestration: `ContentWorkerOrchestrator.process_available_jobs()` теперь владеет batch loop до трех ready jobs, empty-queue stop и exception-to-last-error handling.
+- `InterviewPrepTUI.start_background_content_worker()` оставляет за собой AppServices lifecycle, thread handoff через `call_from_thread` и result application; finish/result status transition пока остается следующим unchecked leaf.
+- Проверки: `.venv/bin/python -m unittest tests.test_tui.ContentWorkerControllerTests tests.test_tui.TUITests.test_tui_content_screen_lists_service_jobs tests.test_tui.TUITests.test_tui_content_screen_pauses_and_resumes_worker_without_deleting_jobs tests.test_tui.TUITests.test_tui_content_screen_retries_failed_job -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### TUI content worker orchestration state
+
+- Первый unchecked roadmap item про content worker orchestration оказался слишком крупным для одного безопасного шага, поэтому он разбит в `## Next` на smaller controller leaves.
+- Закрыт первый leaf: `interview_prep.ui.content_worker_controller.ContentWorkerOrchestrator` теперь владеет TUI-local `status`/`running`/`paused` state и pause/resume/start guard decisions.
+- `InterviewPrepTUI` делегирует эти флаги через свойства, сохраняя прежние thread side effects, worker loop и result application внутри TUI для следующих leaf.
+- Проверки: `.venv/bin/python -m unittest tests.test_tui.ContentWorkerControllerTests tests.test_tui.TUITests.test_tui_content_screen_lists_service_jobs tests.test_tui.TUITests.test_tui_content_screen_pauses_and_resumes_worker_without_deleting_jobs tests.test_tui.TUITests.test_tui_content_screen_retries_failed_job -v`, `.venv/bin/python -m compileall interview_prep`. Первая попытка targeted TUI tests использовала устаревшие имена двух тестов и завершилась loader errors без выполнения этих тестов.
+
+### TUI system design auxiliary transitions controller
+
+- Закрыт roadmap leaf про checkpoint/pressure/final-feedback transitions: loading и finish state для `/sd-checkpoint`, `/sd-pressure` и `/sd-feedback` теперь проходят через pure helpers в `interview_prep.ui.system_design_controller`.
+- `InterviewPrepTUI` применяет snapshots вокруг прежних side effects: сохранение checkpoint/pressure transcript messages и final feedback artifact/evaluation осталось в TUI/service path.
+- Родительский roadmap item про system-design state transitions закрыт, потому что все выделенные controller leaf завершены.
+- Проверки: `.venv/bin/python -m unittest tests.test_tui.SystemDesignControllerTests tests.test_tui.TUITests.test_tui_system_design_checkpoint_saves_interviewer_message_without_final_feedback tests.test_tui.TUITests.test_tui_system_design_pressure_saves_interviewer_follow_up_without_final_feedback tests.test_tui.TUITests.test_tui_system_design_mode_runs_interviewer_flow_without_saving_answer -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### TUI system design finish-turn controller
+
+- Закрыт roadmap leaf про finish-turn transition: ответ interviewer в system design mock теперь проходит через pure `interview_prep.ui.system_design_controller.build_system_design_finish_turn_snapshot()` для transcript entries, pending state, Ollama/fallback status, history message и возврата в `system_design`.
+- `InterviewPrepTUI.finish_system_design_turn()` применяет snapshot вокруг прежних side effects: сохранение transcript и автоперенос artifact-команд из candidate message остались в TUI/service path.
+- Проверки: `.venv/bin/python -m unittest tests.test_tui.SystemDesignControllerTests tests.test_tui.TUITests.test_tui_composer_submits_multiline_code_block_to_system_design tests.test_tui.TUITests.test_tui_system_design_mode_runs_interviewer_flow_without_saving_answer tests.test_tui.TUITests.test_tui_autosaves_explicit_artifact_commands_from_system_design_transcript -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### TUI system design request controller
+
+- Закрыт roadmap leaf про request/loading transition для кандидатского turn: отправка сообщения в system design mock теперь использует pure `interview_prep.ui.system_design_controller.build_system_design_request_snapshot()` для pending message, loading mode, Ollama status и history message.
+- `InterviewPrepTUI.request_system_design_turn()` применяет snapshot перед прежними side effects: async interviewer call, transcript/artifact persistence и finish-render flow остались в TUI.
+- Проверки: `.venv/bin/python -m unittest tests.test_tui.SystemDesignControllerTests tests.test_tui.TUITests.test_tui_composer_submits_multiline_code_block_to_system_design tests.test_tui.TUITests.test_tui_system_design_mode_runs_interviewer_flow_without_saving_answer -v`, `.venv/bin/python -m compileall interview_prep`. Системный `python3` не смог импортировать TUI tests из-за отсутствующего `textual`, поэтому итоговые проверки выполнены через project `.venv`.
+
 ### TUI system design entry controller
 
 - Первый unchecked roadmap item про system-design state transitions оказался слишком крупным для одного безопасного шага, поэтому он разбит в `## Next` на smaller controller leaves.

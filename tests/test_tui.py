@@ -41,6 +41,7 @@ from interview_prep.services.session_service import (
     GeneratedFeedback,
 )
 from interview_prep.services.system_design_service import DEFAULT_SYSTEM_DESIGN_SCENARIO, SystemDesignService
+from interview_prep.ui.content_worker_controller import ContentWorkerOrchestrator, PAUSED_MESSAGE
 from interview_prep.ui.learning_controller import (
     LEARNING_ENTRY_FEEDBACK,
     build_learning_entry_snapshot,
@@ -59,7 +60,15 @@ from interview_prep.ui.practice_controller import (
 )
 from interview_prep.ui.system_design_controller import (
     SYSTEM_DESIGN_ENTRY_FEEDBACK,
+    build_system_design_checkpoint_finish_snapshot,
+    build_system_design_checkpoint_loading_snapshot,
     build_system_design_entry_snapshot,
+    build_system_design_feedback_finish_snapshot,
+    build_system_design_feedback_loading_snapshot,
+    build_system_design_finish_turn_snapshot,
+    build_system_design_pressure_finish_snapshot,
+    build_system_design_pressure_loading_snapshot,
+    build_system_design_request_snapshot,
 )
 from interview_prep.ui.tui import (
     Composer,
@@ -238,6 +247,124 @@ class PracticeControllerTests(unittest.TestCase):
         self.assertFalse(snapshot.showing_hint)
         self.assertFalse(snapshot.showing_reference)
         self.assertEqual(snapshot.mode, "answering")
+
+
+class ContentWorkerControllerTests(unittest.TestCase):
+    def test_pause_resume_and_start_decisions_update_worker_state(self) -> None:
+        worker = ContentWorkerOrchestrator()
+
+        start = worker.request_start()
+        self.assertTrue(start.should_start_thread)
+        self.assertTrue(worker.running)
+        self.assertEqual(worker.status, "generating...")
+
+        pause = worker.pause()
+        self.assertFalse(pause.should_start_thread)
+        self.assertTrue(worker.paused)
+        self.assertEqual(worker.status, "paused")
+        self.assertEqual(
+            pause.history_message,
+            "TUI content worker поставлен на паузу после текущей running-задачи.",
+        )
+
+        worker.running = False
+        paused_start = worker.request_start()
+        self.assertFalse(paused_start.should_start_thread)
+        self.assertEqual(paused_start.history_message, PAUSED_MESSAGE)
+
+        resume = worker.resume()
+        self.assertTrue(resume.should_start_thread)
+        self.assertFalse(worker.paused)
+        self.assertEqual(worker.status, "idle")
+        self.assertEqual(resume.history_message, "TUI content worker возобновлен.")
+
+    def test_start_is_noop_while_worker_is_running(self) -> None:
+        worker = ContentWorkerOrchestrator()
+        worker.request_start()
+
+        second_start = worker.request_start()
+
+        self.assertFalse(second_start.should_start_thread)
+        self.assertFalse(second_start.should_render)
+        self.assertEqual(worker.status, "generating...")
+
+    def test_process_available_jobs_stops_after_empty_queue_or_limit(self) -> None:
+        class FakeContentGeneration:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def process_next_job(self):
+                self.calls += 1
+                if self.calls > 2:
+                    return None
+                return f"job-{self.calls}"
+
+        class FakeLLM:
+            last_error = "fallback used"
+
+        worker = ContentWorkerOrchestrator()
+        content_generation = FakeContentGeneration()
+
+        run = worker.process_available_jobs(content_generation, FakeLLM(), limit=3)
+
+        self.assertEqual(run.results, ("job-1", "job-2"))
+        self.assertEqual(run.last_error, "fallback used")
+        self.assertEqual(content_generation.calls, 3)
+
+    def test_process_available_jobs_captures_processing_exception(self) -> None:
+        class FailingContentGeneration:
+            def process_next_job(self):
+                raise RuntimeError("database locked")
+
+        worker = ContentWorkerOrchestrator()
+
+        run = worker.process_available_jobs(FailingContentGeneration(), object())
+
+        self.assertEqual(run.results, ())
+        self.assertEqual(run.last_error, "database locked")
+
+    def test_finish_run_normalizes_results_and_updates_status(self) -> None:
+        worker = ContentWorkerOrchestrator()
+        worker.running = True
+        done_result = SimpleNamespace(job=SimpleNamespace(status="done"))
+        failed_result = SimpleNamespace(job=SimpleNamespace(status="failed"))
+
+        empty = worker.finish_run(None)
+        self.assertFalse(worker.running)
+        self.assertEqual(empty.results, ())
+        self.assertEqual(empty.status, "idle")
+        self.assertEqual(empty.history_message, "Автогенерация контента: задач в очереди нет.")
+
+        done = worker.finish_run([done_result])
+        self.assertEqual(done.results, (done_result,))
+        self.assertEqual(done.status, "done 1 job(s)")
+        self.assertEqual(worker.status, "done 1 job(s)")
+
+        failed = worker.finish_run((done_result, failed_result))
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.results, (done_result, failed_result))
+
+    def test_finish_run_keeps_paused_status_after_result(self) -> None:
+        worker = ContentWorkerOrchestrator()
+        worker.running = True
+        worker.paused = True
+        done_result = SimpleNamespace(job=SimpleNamespace(status="done"))
+
+        finish = worker.finish_run(done_result)
+
+        self.assertFalse(worker.running)
+        self.assertEqual(finish.results, (done_result,))
+        self.assertEqual(finish.status, "paused")
+        self.assertEqual(worker.status, "paused")
+
+    def test_mark_unmounted_clears_running_state(self) -> None:
+        worker = ContentWorkerOrchestrator()
+        worker.request_start()
+
+        worker.mark_unmounted()
+
+        self.assertFalse(worker.running)
+        self.assertEqual(worker.status, "idle")
 
 
 class LearningControllerTests(unittest.TestCase):
@@ -534,6 +661,122 @@ class SystemDesignControllerTests(unittest.TestCase):
         self.assertEqual(snapshot.system_design_scenario, DEFAULT_SYSTEM_DESIGN_SCENARIO)
         self.assertIsNone(snapshot.system_design_scenario_id)
         self.assertEqual(snapshot.system_design_transcript, ())
+
+    def test_build_system_design_request_snapshot_sets_loading_candidate_turn(self) -> None:
+        snapshot = build_system_design_request_snapshot("Начну с requirements и API.")
+
+        self.assertEqual(snapshot.system_design_pending_message, "Начну с requirements и API.")
+        self.assertEqual(snapshot.mode, "loading_system_design")
+        self.assertEqual(snapshot.ollama_status, "system design interviewer...")
+        self.assertEqual(snapshot.last_feedback, "Интервьюер готовит следующий вопрос...")
+        self.assertEqual(
+            snapshot.history_message,
+            "System design interviewer думает над следующим вопросом...",
+        )
+
+    def test_build_system_design_finish_turn_snapshot_records_success_reply(self) -> None:
+        snapshot = build_system_design_finish_turn_snapshot(
+            user_message="Начну с requirements и API.",
+            response="Какие NFR ключевые?",
+            last_error=None,
+        )
+
+        self.assertEqual(
+            snapshot.transcript_entries,
+            (
+                ("Кандидат", "Начну с requirements и API."),
+                ("Интервьюер", "Какие NFR ключевые?"),
+            ),
+        )
+        self.assertEqual(snapshot.system_design_pending_message, "")
+        self.assertEqual(snapshot.ollama_status, "ok")
+        self.assertEqual(snapshot.last_feedback, "Какие NFR ключевые?")
+        self.assertEqual(snapshot.history_message, "Интервьюер ответил.")
+        self.assertEqual(snapshot.mode, "system_design")
+
+    def test_build_system_design_finish_turn_snapshot_records_fallback_without_empty_user_turn(self) -> None:
+        snapshot = build_system_design_finish_turn_snapshot(
+            user_message="",
+            response="Fallback interviewer.",
+            last_error="timeout",
+        )
+
+        self.assertEqual(snapshot.transcript_entries, (("Интервьюер", "Fallback interviewer."),))
+        self.assertEqual(snapshot.ollama_status, "fallback")
+        self.assertEqual(snapshot.history_message, "System design fallback: timeout")
+
+    def test_build_system_design_checkpoint_snapshots_cover_loading_and_finish(self) -> None:
+        loading = build_system_design_checkpoint_loading_snapshot()
+
+        self.assertEqual(loading.mode, "loading_system_design_checkpoint")
+        self.assertEqual(loading.ollama_status, "system design checkpoint...")
+        self.assertEqual(loading.last_feedback, "Готовлю короткий system design checkpoint...")
+        self.assertEqual(
+            loading.history_message,
+            "System design interviewer готовит checkpoint без финальной оценки...",
+        )
+
+        finish = build_system_design_checkpoint_finish_snapshot(
+            checkpoint="Checkpoint body.",
+            last_error=None,
+        )
+
+        self.assertEqual(finish.transcript_entries, (("Интервьюер", "Checkpoint body."),))
+        self.assertEqual(finish.ollama_status, "ok")
+        self.assertEqual(finish.last_feedback, "System design checkpoint\n\nCheckpoint body.")
+        self.assertEqual(finish.history_message, "System design checkpoint готов.")
+        self.assertEqual(finish.mode, "system_design")
+
+    def test_build_system_design_pressure_snapshots_cover_loading_and_fallback_finish(self) -> None:
+        loading = build_system_design_pressure_loading_snapshot()
+
+        self.assertEqual(loading.mode, "loading_system_design_pressure")
+        self.assertEqual(loading.ollama_status, "system design pressure...")
+        self.assertEqual(loading.last_feedback, "Готовлю pressure follow-up question...")
+        self.assertEqual(
+            loading.history_message,
+            "System design interviewer готовит pressure follow-up question...",
+        )
+
+        finish = build_system_design_pressure_finish_snapshot(
+            pressure="Pressure body.",
+            last_error="timeout",
+        )
+
+        self.assertEqual(finish.transcript_entries, (("Интервьюер", "Pressure body."),))
+        self.assertEqual(finish.ollama_status, "fallback")
+        self.assertEqual(finish.last_feedback, "System design pressure follow-up\n\nPressure body.")
+        self.assertEqual(finish.history_message, "System design pressure follow-up fallback: timeout")
+        self.assertEqual(finish.mode, "system_design")
+
+    def test_build_system_design_feedback_snapshots_cover_loading_and_finish_source(self) -> None:
+        loading = build_system_design_feedback_loading_snapshot()
+
+        self.assertEqual(loading.mode, "loading_system_design_feedback")
+        self.assertEqual(loading.ollama_status, "оценивает system design...")
+        self.assertEqual(loading.last_feedback, "Готовлю итоговый system design feedback...")
+        self.assertEqual(
+            loading.history_message,
+            "Генерирую итоговый feedback по system design mock interview...",
+        )
+
+        success = build_system_design_feedback_finish_snapshot(
+            feedback="Feedback body.",
+            last_error=None,
+        )
+        fallback = build_system_design_feedback_finish_snapshot(
+            feedback="Fallback body.",
+            last_error="bad json",
+        )
+
+        self.assertEqual(success.ollama_status, "ok")
+        self.assertEqual(success.last_feedback, "Итоговый system design feedback\n\nFeedback body.")
+        self.assertEqual(success.history_message, "Итоговый system design feedback готов.")
+        self.assertEqual(success.source, "llm")
+        self.assertEqual(success.mode, "system_design")
+        self.assertEqual(fallback.ollama_status, "fallback")
+        self.assertEqual(fallback.history_message, "System design feedback fallback: bad json")
+        self.assertEqual(fallback.source, "fallback")
 
 
 class TUITests(unittest.IsolatedAsyncioTestCase):
@@ -1057,6 +1300,63 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.mode, "answering")
                     self.assertIsNotNone(app.topic)
                     self.assertEqual(app.topic.id, practice_topic_id)
+            finally:
+                app.services.close()
+
+    async def test_tui_smoke_switches_today_practice_learn_system_design_readiness_practice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_mode_chain_smoke.db"))
+            app.services.content_generation = self.QuietContentGeneration()
+            try:
+                async with app.run_test(size=(140, 36)) as pilot:
+                    self.assertEqual(app.mode, "select_topic")
+                    self.assertIn("[bold cyan]Today[/bold cyan]", app.question_text())
+
+                    clicked_practice = await pilot.click("#action-practice")
+                    await pilot.pause()
+
+                    self.assertTrue(clicked_practice)
+                    self.assertEqual(app.mode, "answering")
+                    self.assertIsNotNone(app.session)
+                    self.assertIsNotNone(app.topic)
+                    self.assertIsNotNone(app.question)
+                    practice_session_id = app.session.id
+                    practice_topic_id = app.topic.id
+                    practice_question_id = app.question.id
+
+                    clicked_learn = await pilot.click("#action-learn")
+                    await pilot.pause()
+
+                    self.assertTrue(clicked_learn)
+                    self.assertEqual(app.mode, "learning")
+                    self.assertIn("Режим обучения", app.question_text())
+
+                    clicked_system_design = await pilot.click("#action-system-design")
+                    await pilot.pause()
+
+                    self.assertTrue(clicked_system_design)
+                    self.assertEqual(app.mode, "system_design")
+                    self.assertIn("System Design Mock Interview", app.question_text())
+
+                    input_bar = app.query_one("#input_bar", TextArea)
+                    input_bar.value = "/readiness"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "readiness")
+                    self.assertIn("[bold cyan]Readiness dashboard[/bold cyan]", app.question_text())
+
+                    clicked_practice_return = await pilot.click("#action-practice")
+                    await pilot.pause()
+
+                    self.assertTrue(clicked_practice_return)
+                    self.assertEqual(app.mode, "answering")
+                    self.assertIsNotNone(app.session)
+                    self.assertIsNotNone(app.topic)
+                    self.assertIsNotNone(app.question)
+                    self.assertEqual(app.session.id, practice_session_id)
+                    self.assertEqual(app.topic.id, practice_topic_id)
+                    self.assertEqual(app.question.id, practice_question_id)
             finally:
                 app.services.close()
 
@@ -3268,6 +3568,16 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(notes.text, "Global draft before closing TUI.")
             finally:
                 reopened_app.services.close()
+
+    async def test_tui_unmount_clears_running_content_worker_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_worker_unmount.db"))
+            async with app.run_test(size=(120, 36)):
+                app.content_worker_running = True
+                app.content_status = "generating..."
+
+            self.assertFalse(app.content_worker_running)
+            self.assertEqual(app.content_status, "idle")
 
     async def test_tui_learning_mode_does_not_save_interview_answer(self) -> None:
         class FakeLearning:
