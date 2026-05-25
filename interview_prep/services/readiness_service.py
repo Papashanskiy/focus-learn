@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from interview_prep.domain.models import Competency
+from interview_prep.domain.models import (
+    Competency,
+    SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE,
+)
 from interview_prep.infra.repositories import SQLiteRepository
 
 MIN_COMPETENCY_ANSWERS = 3
@@ -16,6 +19,7 @@ class ReadinessGap:
     readiness_score: int
     reasons: tuple[str, ...]
     next_action: str
+    must_fix_drill: str
 
     @property
     def why_this_drill(self) -> str:
@@ -36,6 +40,7 @@ class ReadinessGap:
             "readiness_score": self.readiness_score,
             "reasons": list(self.reasons),
             "next_action": self.next_action,
+            "must_fix_drill": self.must_fix_drill,
             "why_this_drill": self.why_this_drill,
         }
 
@@ -67,6 +72,7 @@ class ReadinessWeeklyTrendPoint:
     week_start: date
     week_end: date
     session_count: int
+    baseline_session_count: int
     avg_readiness_delta: float
     total_readiness_delta: float
 
@@ -75,6 +81,7 @@ class ReadinessWeeklyTrendPoint:
             "week_start": self.week_start.isoformat(),
             "week_end": self.week_end.isoformat(),
             "session_count": self.session_count,
+            "baseline_session_count": self.baseline_session_count,
             "avg_readiness_delta": self.avg_readiness_delta,
             "total_readiness_delta": self.total_readiness_delta,
         }
@@ -196,27 +203,35 @@ class ReadinessService:
         max_weeks: int = 8,
     ) -> tuple[ReadinessWeeklyTrendPoint, ...]:
         rows = self.repository.list_completed_session_outcomes_for_readiness_trend()
-        buckets: dict[date, list[float]] = {}
+        buckets: dict[date, list[tuple[float, str]]] = {}
         for row in rows:
             ended_at = _parse_datetime(row.get("ended_at"))
             readiness_delta = _optional_float(row.get("readiness_delta"))
             if ended_at is None or readiness_delta is None:
                 continue
             week_start = ended_at.date() - timedelta(days=ended_at.weekday())
-            buckets.setdefault(week_start, []).append(readiness_delta)
+            buckets.setdefault(week_start, []).append(
+                (readiness_delta, str(row.get("outcome_type") or "practice"))
+            )
 
         if len(buckets) < min_weeks:
             return tuple()
 
         points: list[ReadinessWeeklyTrendPoint] = []
         for week_start in sorted(buckets)[-max_weeks:]:
-            deltas = buckets[week_start]
+            items = buckets[week_start]
+            deltas = [item[0] for item in items]
             total = sum(deltas)
             points.append(
                 ReadinessWeeklyTrendPoint(
                     week_start=week_start,
                     week_end=week_start + timedelta(days=6),
                     session_count=len(deltas),
+                    baseline_session_count=sum(
+                        1
+                        for _, outcome_type in items
+                        if outcome_type == SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE
+                    ),
                     avg_readiness_delta=round(total / len(deltas), 3),
                     total_readiness_delta=round(total, 3),
                 )
@@ -378,6 +393,7 @@ def _gap_from_aggregate(item: CompetencyReadinessAggregate) -> ReadinessGap:
         readiness_score=item.readiness_score,
         reasons=item.readiness_reasons,
         next_action=_next_action_for_gap(item),
+        must_fix_drill=_must_fix_drill_for_gap(item),
     )
 
 
@@ -417,6 +433,32 @@ def _next_action_for_gap(item: CompetencyReadinessAggregate) -> str:
     if "нет свежей практики" in reasons:
         return f"Начать baseline drill по competency: {title}."
     return f"Выбрать следующий короткий drill по competency: {title}."
+
+
+def _must_fix_drill_for_gap(item: CompetencyReadinessAggregate) -> str:
+    reasons = item.readiness_reasons
+    title = item.competency.title
+    if "нет system design практики" in reasons:
+        return (
+            "Провести один `/mock-interview`, закрыть `/req`, `/api`, `/data`, `/risk`, "
+            "затем запросить `/sd-feedback`."
+        )
+    if any(reason.startswith("низкая rubric оценка:") for reason in reasons):
+        return (
+            f"Перерешать последний слабый ответ по {title}: сначала тезисный план, затем "
+            "production tradeoffs и failure modes."
+        )
+    if any(reason.startswith("мало ответов:") for reason in reasons):
+        return f"Ответить на 3 коротких вопроса по {title} и сохранить self-score/rubric evidence."
+    if "нет rubric оценки" in reasons:
+        return f"Пройти один TUI practice answer по {title}, чтобы получить structured rubric score."
+    if any(reason.startswith("давно не повторялось:") for reason in reasons):
+        return f"Сделать 15-минутный refresh drill по {title} с одним новым ответом."
+    if "нет связанных вопросов" in reasons:
+        return f"Сгенерировать или добавить 2 accepted question по {title}, затем пройти один drill."
+    if "нет свежей практики" in reasons:
+        return f"Запустить baseline/practice drill по {title} и сохранить первый evidence answer."
+    return f"Сделать один focused drill по {title} и обновить evidence перед интервью."
 
 
 def _overall_readiness_label(

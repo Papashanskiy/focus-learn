@@ -199,6 +199,7 @@ def format_session_outcome(outcome: SessionOutcome | None) -> str:
     lines = [
         "[bold]Итог сессии[/bold]",
         f"[dim]Создан: {outcome.created_at.isoformat(timespec='minutes')}[/dim]",
+        f"Type: {escape(outcome.outcome_type)}",
         f"Readiness delta: {outcome.readiness_delta:+.2f}",
         "",
         "[bold]Summary[/bold]",
@@ -508,6 +509,8 @@ def command_palette_text() -> str:
             [
                 "/accept-topic начать рекомендованную тему",
                 "/readiness focused dashboard по competencies, score, evidence и next action",
+                "/baseline-repeat начать due repeat baseline session",
+                "/mock-interview начать mixed senior interview без ручного выбора topic",
                 "/generate-curriculum поставить curriculum starter pack в background queue",
                 "/system-design  mock interview по проектированию сервиса",
             ],

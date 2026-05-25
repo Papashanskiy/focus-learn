@@ -25,7 +25,7 @@ MVP реализован:
 
 - CLI-команды для инициализации, тем, вопросов, сессий, добавления вопросов и статистики.
 - TUI workspace через `python -m interview_prep tui` и alias `app`.
-- Read-only WSGI adapter skeleton для будущего web UI поверх `services.read`: `/api/smoke`, `/api/dashboard`, `/health`; TUI остается основным интерфейсом.
+- Read-only WSGI adapter skeleton для будущего web UI поверх `services.read`: `/api/smoke`, `/api/dashboard`, `/api/readiness`, `/api/competencies`, `/api/sessions/<id>`, `/api/notebook`, `/health`; TUI остается основным интерфейсом.
 - Нижний TUI input заменен на многострочный composer для ответов и slash commands; Enter отправляет текущий draft, Shift+Enter вставляет перенос строки внутри ответа, а длинный draft расширяет composer до capped scrollable области.
 - Учебный TUI-режим `/learn` для разъяснений с ИИ без сохранения текста как interview answer; последние учебные реплики сохраняются, восстанавливаются по теме и листаются командами `/learn-older`/`/learn-newer`.
 - TUI system design mode поддерживает `/sd-checkpoint`: короткую промежуточную проверку от интервьюера без создания final feedback artifact/evaluation, и `/sd-pressure`: targeted pressure follow-up по capacity, hot keys, retries, idempotency, migrations и abuse protection. Сохраненный final feedback и structured rubric scores доступны в TUI history через `/history system-design` и в CLI через `system-design-history`.
@@ -35,7 +35,7 @@ MVP реализован:
 - CLI `curriculum-status` показывает read-only покрытие generated curriculum: количество curriculum topics, subtopics, learning objectives, generated questions и пустые зоны bootstrap/fallback.
 - Generated questions сохраняются со статусом `pending_review` и проходят review через CLI `questions-review` или TUI `/questions-review`; accept/archive меняет `source_quality_status` без удаления строки.
 - `CurriculumService.suggest_next_topic()` выбирает следующую тему для practice: сначала первая новая тема по generated curriculum order, затем слабая тема по self-score, затем самая давно отвеченная тема.
-- TUI показывает Today panel при старте: Enter запускает primary recommended drill, а конкретную рекомендованную practice-тему можно принять slash-командой `/accept-topic` или ручным выбором темы.
+- TUI показывает Today panel при старте: Enter запускает primary recommended drill, а конкретную рекомендованную practice-тему можно принять slash-командой `/accept-topic` или ручным выбором темы. `/readiness` дополнительно показывает `Must fix before interview` drills по top readiness gaps.
 - Фоновая генерация контента есть через SQLite jobs, CLI-команды и автоматический TUI-flow: при выборе темы TUI может сам поставить `question` job, `/learn` ставит `learning-material`, `/system-design` ставит `system-design-scenario`, а служебный CLI может поставить `reference-answer` job для регенерации эталонных ответов темы; затем background worker обрабатывает несколько queued jobs.
 - Service-level лимит фоновой генерации не дает иметь больше одной `queued`/`running` job на одну пару topic/kind; retry failed job проходит через тот же лимит.
 - Верхняя строка TUI показывает компактный status фоновой генерации: состояние worker, счетчики queued/running/failed и последний done/failed generation result без открытия CLI.
@@ -61,6 +61,7 @@ MVP реализован:
 - Не смешивать UI, БД и бизнес-логику.
 - Новые сценарии сначала добавлять в `services`, затем подключать в `ui`.
 - Все операции с SQLite должны идти через `SQLiteRepository`.
+- Web adapter boundary: `interview_prep/ui/web.py` не должен обращаться к `SQLiteRepository` напрямую. Read-only endpoints идут через `ReadOnlyApplicationFacade`; будущие write endpoints должны сначала получить явный service/use-case method и только затем подключаться в adapter.
 - LLM должна оставаться заменяемой через интерфейс `LLMClient`.
 - Не добавлять новые hardcoded учебные материалы как основной путь развития. Hardcoded данные допустимы только как минимальный bootstrap/fallback; основной контент должен приходить из curriculum/generation pipeline.
 - Фоновая генерация контента должна постепенно становиться автоматической частью приложения, а CLI-команды должны оставаться служебным интерфейсом для диагностики и ручного управления.

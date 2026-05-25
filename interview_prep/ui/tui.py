@@ -301,6 +301,11 @@ class InterviewPrepTUI(App[None]):
         self.current_answer: Answer | None = None
         self.pending_answer_text: str | None = None
         self.started_at: datetime | None = None
+        self.baseline_session_id: int | None = None
+        self.baseline_question_ids: tuple[int, ...] = ()
+        self.mock_interview_session_id: int | None = None
+        self.mock_interview_question_ids: tuple[int, ...] = ()
+        self.mock_interview_sections: tuple[str, ...] = ()
         self.answered_count = 0
         self.skipped_count = 0
         self.last_feedback = ""
@@ -410,7 +415,7 @@ class InterviewPrepTUI(App[None]):
         with Horizontal(id="today_actions"):
             yield Button("Start Drill", id="today-start-drill", classes="today_action")
             yield Button("Review Weak Answer", id="today-review-weak-answer", classes="today_action")
-            yield Button("System Design Mock", id="today-system-design", classes="today_action")
+            yield Button("Mock Senior Interview", id="today-system-design", classes="today_action")
             yield Button("Open Readiness", id="today-open-readiness", classes="today_action")
             yield Button("Notebook", id="today-notebook", classes="today_action")
         with Horizontal(id="workspace"):
@@ -532,7 +537,7 @@ class InterviewPrepTUI(App[None]):
             self.render_all()
             return
         if self.mode == "readiness":
-            self.add_history("Readiness dashboard read-only. Используй /readiness, /practice или /stats.")
+            self.add_history("Readiness dashboard read-only. Используй /mock-interview, /readiness, /practice или /stats.")
             self.render_all()
             return
         if self.mode in {
@@ -620,7 +625,7 @@ class InterviewPrepTUI(App[None]):
         elif button_id == "today-review-weak-answer":
             self.activate_today_review_weak_answer_action()
         elif button_id == "today-system-design":
-            self.activate_system_design_action()
+            self.start_mock_senior_interview()
         elif button_id == "today-open-readiness":
             self.activate_readiness_action()
         elif button_id == "today-notebook":
@@ -701,18 +706,22 @@ class InterviewPrepTUI(App[None]):
     def activate_today_start_drill_action(self) -> None:
         if self.block_mode_switch_while_loading():
             return
+        repeat_status = self.baseline_repeat_due_status()
+        if repeat_status is not None:
+            self.start_baseline_session()
+            return
         empty_state_action = self.today_empty_state_action()
         if empty_state_action == "generate_curriculum":
             self.generate_curriculum_command()
             return
         if empty_state_action == "baseline_session":
-            self.activate_practice_action()
+            self.start_baseline_session()
             return
         drill = self.today_recommended_drill()
         if drill is not None:
             reasons = getattr(drill, "reasons", [])
             if "нет system design практики" in reasons:
-                self.activate_system_design_action()
+                self.start_mock_senior_interview()
                 return
             if "нет связанных вопросов" in reasons:
                 self.generate_curriculum_command()
@@ -813,6 +822,10 @@ class InterviewPrepTUI(App[None]):
             self.enter_notebook(command.removeprefix("/notebook").strip())
         elif command == "/readiness":
             self.enter_readiness()
+        elif command == "/baseline-repeat":
+            self.start_due_baseline_repeat()
+        elif command == "/mock-interview":
+            self.start_mock_senior_interview()
         elif command == "/pause-content":
             self.pause_content_worker()
         elif command == "/resume-content":
@@ -1561,6 +1574,11 @@ class InterviewPrepTUI(App[None]):
         self.start_background_content_worker()
 
     def start_session_from_input(self, raw: str) -> None:
+        self.baseline_session_id = None
+        self.baseline_question_ids = ()
+        self.mock_interview_session_id = None
+        self.mock_interview_question_ids = ()
+        self.mock_interview_sections = ()
         topic_id: int | None = None
         topics = self.services.questions.list_topics()
         suggested = self.suggested_practice_topic(topics)
@@ -1589,6 +1607,55 @@ class InterviewPrepTUI(App[None]):
         self.add_history(f"Сессия #{self.session.id} начата.")
         self.persist_notes_draft()
         self.ensure_background_content_for_current_topic()
+        self.load_next_question()
+
+    def start_baseline_session(self) -> None:
+        self.mock_interview_session_id = None
+        self.mock_interview_question_ids = ()
+        self.mock_interview_sections = ()
+        try:
+            plan = self.services.calibration.start_baseline_session(
+                target_minutes=DEFAULT_SESSION_MINUTES,
+            )
+        except Exception as exc:
+            self.add_history(f"Не удалось начать baseline session: {exc}")
+            self.render_all()
+            return
+        self.baseline_session_id = plan.session.id
+        self.baseline_question_ids = plan.question_ids
+        self.apply_practice_session_start_snapshot(
+            build_practice_session_start_snapshot(plan.session, None)
+        )
+        self.add_history(
+            f"Baseline session #{self.session.id} начата: {len(self.baseline_question_ids)} вопросов по разным competencies."
+        )
+        self.persist_notes_draft()
+        self.load_next_question()
+
+    def start_mock_senior_interview(self) -> None:
+        if self.block_mode_switch_while_loading():
+            return
+        self.exit_other_focused_modes(set())
+        self.baseline_session_id = None
+        self.baseline_question_ids = ()
+        try:
+            plan = self.services.calibration.start_mock_senior_interview_session(
+                target_minutes=DEFAULT_SESSION_MINUTES,
+            )
+        except Exception as exc:
+            self.add_history(f"Не удалось начать mock senior interview: {exc}")
+            self.render_all()
+            return
+        self.mock_interview_session_id = plan.session.id
+        self.mock_interview_question_ids = plan.question_ids
+        self.mock_interview_sections = plan.sections
+        self.apply_practice_session_start_snapshot(
+            build_practice_session_start_snapshot(plan.session, None)
+        )
+        self.add_history(
+            f"Mock senior interview #{self.session.id} начат: {len(self.mock_interview_question_ids)} секций."
+        )
+        self.persist_notes_draft()
         self.load_next_question()
 
     def apply_practice_session_start_snapshot(self, snapshot: PracticeSessionStartSnapshot) -> None:
@@ -1660,7 +1727,20 @@ class InterviewPrepTUI(App[None]):
     def next_available_question(self) -> Question | None:
         if self.session is None:
             return None
-        questions = self.services.sessions.candidate_questions(self.session.id or 0)
+        if self.baseline_session_id == self.session.id and self.baseline_question_ids:
+            planned_questions = [
+                self.services.repository.get_question(question_id)
+                for question_id in self.baseline_question_ids
+            ]
+            questions = [question for question in planned_questions if question is not None]
+        elif self.mock_interview_session_id == self.session.id and self.mock_interview_question_ids:
+            planned_questions = [
+                self.services.repository.get_question(question_id)
+                for question_id in self.mock_interview_question_ids
+            ]
+            questions = [question for question in planned_questions if question is not None]
+        else:
+            questions = self.services.sessions.candidate_questions(self.session.id or 0)
         answered_ids = self.services.repository.answered_question_ids_for_session(self.session.id or 0)
         blocked_ids = answered_ids | self.skipped_question_ids
         for question in questions:
@@ -2890,6 +2970,11 @@ class InterviewPrepTUI(App[None]):
         self.render_all()
 
     def apply_practice_session_reset_snapshot(self, snapshot: PracticeSessionResetSnapshot) -> None:
+        self.baseline_session_id = None
+        self.baseline_question_ids = ()
+        self.mock_interview_session_id = None
+        self.mock_interview_question_ids = ()
+        self.mock_interview_sections = ()
         self.session = snapshot.session
         self.topic = snapshot.topic
         self.question = snapshot.question
@@ -2920,6 +3005,8 @@ class InterviewPrepTUI(App[None]):
 
     def finish_session_if_needed(self) -> Session | None:
         if self.session is not None and self.session.ended_at is None:
+            is_baseline_session = self.baseline_session_id == self.session.id
+            planned_baseline_questions = len(self.baseline_question_ids)
             finished = self.services.sessions.finish_session(self.session.id or 0, abandon_if_empty=True)
             self.session = Session(
                 id=self.session.id,
@@ -2929,6 +3016,11 @@ class InterviewPrepTUI(App[None]):
                 target_minutes=self.session.target_minutes,
                 status=finished.status,
             )
+            if is_baseline_session and planned_baseline_questions:
+                self.services.calibration.mark_baseline_session_outcome(
+                    self.session.id or 0,
+                    planned_questions=planned_baseline_questions,
+                )
         return self.session
 
     def session_outcome_text(self) -> str:
@@ -3134,7 +3226,7 @@ class InterviewPrepTUI(App[None]):
         options.append(
             Option(
                 "[dim]/accept-topic /commands /content /questions-review /generate-curriculum /history /history learning "
-                "/pause-content /resume-content /materials /notebook(конспект) /readiness /notes /hint "
+                "/pause-content /resume-content /materials /notebook(конспект) /readiness /mock-interview /notes /hint "
                 "/answer /feedback /learn /system-design /practice /skip /stats /finish-session /quit[/dim]",
                 disabled=True,
             )
@@ -3152,7 +3244,7 @@ class InterviewPrepTUI(App[None]):
                 "",
                 (
                     "[dim]Secondary: выбери тему слева или введи topic ID. "
-                    "Команды: /readiness, /generate-curriculum, /learn, /system-design, "
+                    "Команды: /readiness, /mock-interview, /generate-curriculum, /learn, /system-design, "
                     "Конспект обучения: /notebook, /commands, /notes.[/dim]"
                 ),
             ]
@@ -3194,6 +3286,12 @@ class InterviewPrepTUI(App[None]):
         competency_text = self.current_question_competencies_text()
         if competency_text:
             lines.append(f"[dim]Компетенции: {competency_text}[/dim]")
+        baseline_progress_text = self.baseline_progress_text()
+        if baseline_progress_text:
+            lines.append(f"[dim]{baseline_progress_text}[/dim]")
+        mock_interview_progress_text = self.mock_interview_progress_text()
+        if mock_interview_progress_text:
+            lines.append(f"[dim]{mock_interview_progress_text}[/dim]")
         lines.extend(["", self.question.prompt])
         status_text = self.practice_status_text()
         if status_text:
@@ -3263,6 +3361,31 @@ class InterviewPrepTUI(App[None]):
         empty_state = self.today_empty_state_text(snapshot)
         if empty_state:
             return empty_state
+        repeat_status = self.baseline_repeat_due_status()
+        if repeat_status is not None:
+            last_delta = (
+                "н/д"
+                if repeat_status.last_readiness_delta is None
+                else f"{repeat_status.last_readiness_delta:+.2f}"
+            )
+            completed_at = (
+                "-"
+                if repeat_status.last_completed_at is None
+                else repeat_status.last_completed_at.date().isoformat()
+            )
+            return "\n".join(
+                [
+                    "[bold cyan]Today[/bold cyan]",
+                    "Recommended drill: повторная baseline practice session.",
+                    (
+                        "Why this drill: "
+                        f"{escape(repeat_status.reason)} Последняя baseline: {completed_at}; "
+                        f"readiness delta {last_delta}."
+                    ),
+                    "Expected time: 15-25 min",
+                    "Primary action: Enter - начать повторную baseline session; ID темы слева - ручной выбор.",
+                ]
+            )
         drill = summary.recommended_drill
         if drill is None:
             return "\n".join(
@@ -3340,6 +3463,29 @@ class InterviewPrepTUI(App[None]):
             ]
         )
 
+    def baseline_repeat_due_status(self):
+        try:
+            status = self.services.calibration.baseline_repeat_status()
+        except Exception:
+            return None
+        if status.last_session_id is None or not status.is_due:
+            return None
+        return status
+
+    def start_due_baseline_repeat(self) -> None:
+        if self.block_mode_switch_while_loading():
+            return
+        status = self.baseline_repeat_due_status()
+        if status is None:
+            try:
+                current = self.services.calibration.baseline_repeat_status()
+                self.add_history(current.reason)
+            except Exception as exc:
+                self.add_history(f"Baseline repeat status недоступен: {exc}")
+            self.render_all()
+            return
+        self.start_baseline_session()
+
     def today_drill_reason(self, drill) -> str:
         if getattr(drill, "why_this_drill", ""):
             return escape(drill.why_this_drill)
@@ -3367,7 +3513,7 @@ class InterviewPrepTUI(App[None]):
     def today_primary_action(self, drill) -> str:
         reasons = drill.reasons
         if "нет system design практики" in reasons:
-            return "Enter - начать system design mock interview; ID темы слева - ручной practice."
+            return "Enter - начать mock senior interview; ID темы слева - ручной practice."
         if "нет связанных вопросов" in reasons:
             return "Enter - подготовить curriculum; ID темы слева - ручной practice."
         if any(reason.startswith("низкая rubric оценка:") for reason in reasons):
@@ -3389,6 +3535,46 @@ class InterviewPrepTUI(App[None]):
             return ""
         competencies = self.services.questions.list_question_competencies(self.question.id)
         return format_question_competencies(competencies) if competencies else ""
+
+    def baseline_progress_text(self) -> str:
+        if self.session is None or self.baseline_session_id != self.session.id:
+            return ""
+        total = len(self.baseline_question_ids)
+        if total <= 0:
+            return ""
+        answered = min(self.answered_count, total)
+        remaining = max(0, total - answered)
+        return f"Baseline progress: {answered}/{total} answered, {remaining} remaining."
+
+    def mock_interview_progress_text(self) -> str:
+        if self.session is None or self.mock_interview_session_id != self.session.id:
+            return ""
+        total = len(self.mock_interview_question_ids)
+        if total <= 0 or len(self.mock_interview_sections) != total:
+            return ""
+        current_index = min(self.answered_count, total - 1)
+        if self.question is not None and self.question.id in self.mock_interview_question_ids:
+            current_index = self.mock_interview_question_ids.index(self.question.id)
+        current_section = self.mock_interview_section_label(self.mock_interview_sections[current_index])
+        remaining_start = max(self.answered_count, current_index + 1)
+        remaining_sections = self.mock_interview_sections[remaining_start:]
+        remaining_text = ", ".join(
+            self.mock_interview_section_label(section)
+            for section in remaining_sections
+        ) or "none"
+        return (
+            f"Mock interview progress: section {current_section} "
+            f"({current_index + 1}/{total}), remaining sections: {remaining_text}."
+        )
+
+    def mock_interview_section_label(self, section: str) -> str:
+        labels = {
+            "coding": "Coding",
+            "theory": "Theory",
+            "system_design": "System Design",
+            "debugging": "Debugging",
+        }
+        return labels.get(section, section.replace("_", " ").title())
 
     def practice_self_score_text(self) -> str:
         if self.mode == "scoring":
@@ -3783,6 +3969,27 @@ class InterviewPrepTUI(App[None]):
             f"Evidence coverage: {snapshot.covered_competency_count}/{snapshot.competency_count} competencies",
             f"Rubric coverage: {snapshot.evaluated_competency_count}/{snapshot.competency_count} competencies",
         ]
+        repeat_status = self.baseline_repeat_due_status()
+        if repeat_status is not None:
+            last_delta = (
+                "н/д"
+                if repeat_status.last_readiness_delta is None
+                else f"{repeat_status.last_readiness_delta:+.2f}"
+            )
+            completed_at = (
+                "-"
+                if repeat_status.last_completed_at is None
+                else repeat_status.last_completed_at.date().isoformat()
+            )
+            lines.extend(
+                [
+                    "",
+                    "[bold]Calibration[/bold]",
+                    "Repeat baseline: due now.",
+                    f"Last baseline: session #{repeat_status.last_session_id}, {completed_at}, delta {last_delta}.",
+                    "Action: /baseline-repeat - начать повторную baseline session.",
+                ]
+            )
         if snapshot.weekly_trend:
             lines.extend(["", "[bold]Weekly readiness trend[/bold]"])
             for point in snapshot.weekly_trend:
@@ -3802,6 +4009,12 @@ class InterviewPrepTUI(App[None]):
                     f"{gap.readiness_score}/100; {escape(reasons)}"
                 )
                 lines.append(f"  Next action: {escape(gap.next_action)}")
+        lines.extend(["", "[bold]Must fix before interview[/bold]"])
+        if not summary.top_gaps:
+            lines.append("- явных обязательных drills по текущим rules нет")
+        else:
+            for index, gap in enumerate(summary.top_gaps, start=1):
+                lines.append(f"{index}. {escape(gap.must_fix_drill)}")
 
         gap_actions = {gap.competency.slug: gap.next_action for gap in summary.top_gaps}
         lines.extend(["", "[bold]Competencies[/bold]"])
@@ -4006,12 +4219,22 @@ class InterviewPrepTUI(App[None]):
     def practice_side_panel_text(self) -> str:
         lines = [
             "[bold]Practice[/bold]",
-            "",
-            "[bold]Следующее действие[/bold]",
-            self.practice_next_action_text(),
-            "",
-            "[bold]Последние события[/bold]",
         ]
+        baseline_progress_text = self.baseline_progress_text()
+        if baseline_progress_text:
+            lines.extend(["", baseline_progress_text])
+        mock_interview_progress_text = self.mock_interview_progress_text()
+        if mock_interview_progress_text:
+            lines.extend(["", mock_interview_progress_text])
+        lines.extend(
+            [
+                "",
+                "[bold]Следующее действие[/bold]",
+                self.practice_next_action_text(),
+                "",
+                "[bold]Последние события[/bold]",
+            ]
+        )
         lines.extend(self.history[-8:] or ["Пока нет событий."])
         if self.command_palette_visible or self.last_feedback.startswith("Статистика:"):
             lines.extend(["", "[bold]Панель[/bold]", self.last_feedback])
@@ -4706,6 +4929,7 @@ class InterviewPrepTUI(App[None]):
                 one_line_preview(str(exc), limit=140),
                 "",
                 "[bold]Команды[/bold]",
+                "/mock-interview",
                 "/readiness",
                 "/stats",
                 "/practice",
@@ -4729,6 +4953,8 @@ class InterviewPrepTUI(App[None]):
             f"With rubric: {snapshot.evaluated_competency_count}",
             "",
             "[bold]Команды[/bold]",
+            "/baseline-repeat" if self.baseline_repeat_due_status() is not None else "",
+            "/mock-interview",
             "/readiness",
             "/stats",
             "/practice",
@@ -4859,7 +5085,7 @@ class InterviewPrepTUI(App[None]):
         if self.mode == "notebook":
             return "/notebook topic <id>, /notebook subtopic <id>, /notebook competency <slug>, /notebook entry <id>, /practice"
         if self.mode == "readiness":
-            return "/readiness, /stats или /practice назад"
+            return "/mock-interview, /readiness, /stats или /practice назад"
         if self.mode == "session_finished":
             return "/practice новая сессия, /history, /notebook, /quit"
         if self.mode == "learning":

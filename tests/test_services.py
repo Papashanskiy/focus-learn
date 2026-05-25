@@ -24,6 +24,8 @@ from interview_prep.domain.models import (
     QUESTION_SOURCE_QUALITY_ARCHIVED,
     QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
     RubricDimension,
+    SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE,
+    SESSION_OUTCOME_TYPE_PRACTICE,
     SESSION_STATUS_ABANDONED,
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_IN_PROGRESS,
@@ -45,6 +47,7 @@ from interview_prep.infra.seed import (
 )
 from interview_prep.infra.llm import FallbackLLMClient, LLMUnavailable, OllamaClient
 from interview_prep.infra.repositories import SQLiteRepository
+from interview_prep.services.calibration_service import CalibrationService
 from interview_prep.services.content_generation_service import (
     ContentGenerationService,
     JOB_KIND_CURRICULUM,
@@ -543,6 +546,7 @@ class ServiceTests(unittest.TestCase):
                 "next_drills_json",
                 "readiness_delta",
                 "created_at",
+                "outcome_type",
             }.issubset(columns)
         )
 
@@ -588,12 +592,20 @@ class ServiceTests(unittest.TestCase):
 
         row = connection.execute(
             """
-            SELECT session_id, summary, strengths_json, gaps_json, next_drills_json, readiness_delta
+            SELECT
+                session_id,
+                summary,
+                strengths_json,
+                gaps_json,
+                next_drills_json,
+                readiness_delta,
+                outcome_type
             FROM session_outcomes
             WHERE id = 1
             """
         ).fetchone()
         self.assertEqual(row["session_id"], 1)
+        self.assertEqual(row["outcome_type"], SESSION_OUTCOME_TYPE_PRACTICE)
         self.assertEqual(json.loads(row["strengths_json"]), ["Clear tradeoff"])
         self.assertEqual(json.loads(row["gaps_json"]), ["Missing failure mode"])
         self.assertEqual(json.loads(row["next_drills_json"]), ["Retry/idempotency drill"])
@@ -1889,6 +1901,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(saved.gaps, ["Не описал retry/idempotency после serialization failure."])
         self.assertEqual(saved.next_drills, ["Повторить transaction isolation и retry boundaries."])
         self.assertEqual(saved.readiness_delta, 0.15)
+        self.assertEqual(saved.outcome_type, SESSION_OUTCOME_TYPE_PRACTICE)
         self.assertEqual(repository.get_session_outcome(saved.id or 0), saved)
         self.assertEqual(repository.get_session_outcome_for_session(session.id or 0), saved)
 
@@ -1940,6 +1953,35 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(any("Низкие rubric dimensions" in gap for gap in outcome.gaps))
         self.assertTrue(outcome.next_drills)
         self.assertLess(outcome.readiness_delta, 0)
+
+    def test_calibration_marks_baseline_session_outcome(self) -> None:
+        repository = make_repository()
+        sessions = SessionService(repository, StaticLLM())
+        evaluations = EvaluationService(repository)
+        calibration = CalibrationService(repository)
+        plan = calibration.start_baseline_session(target_minutes=25)
+        first_question = plan.picks[0].question
+        answer = sessions.answer_question(
+            plan.session.id or 0,
+            first_question.id or 0,
+            "Baseline answer with a small amount of evidence.",
+            3,
+            with_feedback=False,
+        )
+        evaluations.evaluate_and_store_answer(answer, first_question, use_llm=False)
+        sessions.finish_session(plan.session.id or 0)
+
+        marked = calibration.mark_baseline_session_outcome(
+            plan.session.id or 0,
+            planned_questions=len(plan.picks),
+        )
+
+        self.assertIsNotNone(marked)
+        assert marked is not None
+        self.assertEqual(marked.outcome_type, SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE)
+        self.assertIn("Baseline calibration.", marked.summary)
+        self.assertIn("Planned questions:", marked.summary)
+        self.assertTrue(any("baseline practice session" in item for item in marked.strengths))
 
     def test_finish_abandoned_empty_session_does_not_generate_session_outcome(self) -> None:
         repository = make_repository()
@@ -2469,6 +2511,8 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("не абсолютная оценка кандидата", overall.caveat)
         self.assertEqual(data["recommended_drill"], data["top_gaps"][0])
         self.assertIn("why_this_drill", data["recommended_drill"])
+        self.assertIn("must_fix_drill", data["recommended_drill"])
+        self.assertTrue(data["recommended_drill"]["must_fix_drill"])
         self.assertIn("top readiness gap", data["recommended_drill"]["why_this_drill"])
         self.assertNotIn("готов к senior", data["summary"].lower())
 
@@ -2479,7 +2523,12 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNotNone(topic)
         assert topic is not None
 
-        def save_outcome(ended_at: datetime, readiness_delta: float) -> None:
+        def save_outcome(
+            ended_at: datetime,
+            readiness_delta: float,
+            *,
+            outcome_type: str = SESSION_OUTCOME_TYPE_PRACTICE,
+        ) -> None:
             session = repository.create_session(
                 Session(
                     id=None,
@@ -2500,11 +2549,16 @@ class ServiceTests(unittest.TestCase):
                     next_drills=[],
                     readiness_delta=readiness_delta,
                     created_at=ended_at,
+                    outcome_type=outcome_type,
                 )
             )
 
         save_outcome(datetime(2026, 5, 5, 10, 0, 0), 0.10)
-        save_outcome(datetime(2026, 5, 6, 10, 0, 0), 0.20)
+        save_outcome(
+            datetime(2026, 5, 6, 10, 0, 0),
+            0.20,
+            outcome_type=SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE,
+        )
         save_outcome(datetime(2026, 5, 13, 10, 0, 0), -0.10)
         abandoned = repository.create_session(
             Session(
@@ -2536,11 +2590,14 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(trend[0].week_start.isoformat(), "2026-05-04")
         self.assertEqual(trend[0].week_end.isoformat(), "2026-05-10")
         self.assertEqual(trend[0].session_count, 2)
+        self.assertEqual(trend[0].baseline_session_count, 1)
         self.assertEqual(trend[0].avg_readiness_delta, 0.15)
         self.assertEqual(trend[0].total_readiness_delta, 0.3)
         self.assertEqual(trend[1].week_start.isoformat(), "2026-05-11")
         self.assertEqual(trend[1].session_count, 1)
+        self.assertEqual(trend[1].baseline_session_count, 0)
         self.assertEqual(trend[1].avg_readiness_delta, -0.1)
+        self.assertEqual(snapshot.to_dict()["weekly_trend"][0]["baseline_session_count"], 1)
         self.assertEqual(snapshot.to_dict()["weekly_trend"][0]["avg_readiness_delta"], 0.15)
 
     def test_readiness_recommends_low_rubric_topic_as_first_drill(self) -> None:
@@ -2585,6 +2642,7 @@ class ServiceTests(unittest.TestCase):
             any(reason.startswith("низкая rubric оценка:") for reason in recommended.reasons)
         )
         self.assertIn("Перерешать слабый ответ", recommended.next_action)
+        self.assertIn("production tradeoffs", recommended.must_fix_drill)
         self.assertEqual(
             snapshot.to_dict()["overall_summary"]["recommended_drill"]["competency"]["slug"],
             "databases",
@@ -2662,6 +2720,152 @@ class ServiceTests(unittest.TestCase):
         self.assertGreater(
             [question.id for question in candidates].index(recent_weak_question.id),
             [question.id for question in candidates].index(due_weak_question.id),
+        )
+
+    def test_calibration_baseline_plan_picks_five_distinct_competencies(self) -> None:
+        repository = make_repository()
+        service = CalibrationService(repository)
+
+        picks = service.baseline_question_plan()
+
+        self.assertEqual(len(picks), 5)
+        self.assertEqual(
+            [pick.competency.slug for pick in picks],
+            [
+                "python-runtime",
+                "async-concurrency",
+                "databases",
+                "system-design",
+                "testing-quality",
+            ],
+        )
+        self.assertEqual(len({pick.question.id for pick in picks}), 5)
+        self.assertTrue(all(pick.link.is_primary for pick in picks))
+
+    def test_calibration_baseline_plan_prefers_unanswered_questions(self) -> None:
+        repository = make_repository()
+        now = datetime(2026, 5, 25, 10, 0, 0)
+        python_topic = repository.find_topic_by_slug("python-runtime")
+        python_runtime = repository.find_competency_by_slug("python-runtime")
+        self.assertIsNotNone(python_topic)
+        self.assertIsNotNone(python_runtime)
+        assert python_topic is not None
+        assert python_runtime is not None
+        bootstrap_question = repository.list_questions(python_topic.id or 0)[0]
+        unanswered_question = repository.add_question(
+            Question(
+                id=None,
+                topic_id=python_topic.id or 0,
+                difficulty="senior",
+                prompt="Новый baseline-вопрос по Python runtime.",
+                hint="Проверь, что unanswered идет раньше.",
+                reference_answer="Эталон.",
+                source="test",
+            )
+        )
+        repository.set_question_competencies(
+            unanswered_question.id or 0,
+            [QuestionCompetencyLink(competency=python_runtime, is_primary=True)],
+        )
+        self._save_answer_for_question(
+            repository,
+            bootstrap_question.id or 0,
+            python_topic.id or 0,
+            5,
+            now,
+        )
+
+        picks = CalibrationService(repository).baseline_question_plan(limit=1)
+
+        self.assertEqual(picks[0].competency.slug, "python-runtime")
+        self.assertEqual(picks[0].question.id, unanswered_question.id)
+
+    def test_calibration_starts_mixed_baseline_session_from_plan(self) -> None:
+        repository = make_repository()
+        service = CalibrationService(repository)
+
+        plan = service.start_baseline_session(target_minutes=25)
+
+        self.assertIsNotNone(plan.session.id)
+        self.assertIsNone(plan.session.topic_id)
+        self.assertEqual(plan.session.target_minutes, 25)
+        self.assertEqual(len(plan.picks), 5)
+        self.assertEqual(
+            plan.question_ids,
+            tuple(pick.question.id for pick in service.baseline_question_plan()),
+        )
+
+    def test_calibration_baseline_repeat_status_uses_seven_day_interval(self) -> None:
+        repository = make_repository()
+        service = CalibrationService(repository)
+        topic = repository.find_topic_by_slug("python-runtime")
+        self.assertIsNotNone(topic)
+        assert topic is not None
+        completed_at = datetime(2026, 5, 1, 10, 0, 0)
+        session = repository.create_session(
+            Session(
+                id=None,
+                topic_id=topic.id,
+                started_at=completed_at - timedelta(minutes=30),
+                ended_at=None,
+                target_minutes=60,
+            )
+        )
+        repository.finish_session(session.id or 0, completed_at)
+        repository.upsert_session_outcome(
+            SessionOutcome(
+                id=None,
+                session_id=session.id or 0,
+                summary="Baseline outcome.",
+                strengths=[],
+                gaps=[],
+                next_drills=[],
+                readiness_delta=0.12,
+                created_at=completed_at,
+                outcome_type=SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE,
+            )
+        )
+
+        early = service.baseline_repeat_status(now=datetime(2026, 5, 7, 9, 0, 0))
+        due = service.baseline_repeat_status(now=datetime(2026, 5, 8, 10, 0, 0))
+
+        self.assertEqual(early.last_session_id, session.id)
+        self.assertEqual(early.last_completed_at, completed_at)
+        self.assertEqual(early.last_readiness_delta, 0.12)
+        self.assertEqual(early.next_due_at, datetime(2026, 5, 8, 10, 0, 0))
+        self.assertFalse(early.is_due)
+        self.assertEqual(early.days_until_due, 2)
+        self.assertTrue(due.is_due)
+        self.assertEqual(due.days_until_due, 0)
+
+    def test_mock_senior_interview_plan_mixes_interview_sections(self) -> None:
+        repository = make_repository()
+        service = CalibrationService(repository)
+
+        plan = service.mock_senior_interview_plan()
+
+        self.assertEqual(plan.sections, ("coding", "theory", "system_design", "debugging"))
+        self.assertEqual(len(plan.question_ids), 4)
+        self.assertEqual(len(set(plan.question_ids)), 4)
+        self.assertEqual(
+            [pick.competency.slug for pick in plan.picks],
+            ["python-runtime", "databases", "system-design", "observability"],
+        )
+
+    def test_calibration_starts_mixed_mock_senior_interview_session_from_plan(self) -> None:
+        repository = make_repository()
+        service = CalibrationService(repository)
+
+        plan = service.start_mock_senior_interview_session(target_minutes=45)
+
+        self.assertIsNotNone(plan.session.id)
+        self.assertIsNone(plan.session.topic_id)
+        self.assertEqual(plan.session.target_minutes, 45)
+        self.assertEqual(plan.sections, ("coding", "theory", "system_design", "debugging"))
+        self.assertEqual(len(plan.question_ids), 4)
+        self.assertEqual(
+            plan.question_ids,
+            tuple(pick.question.id for pick in service.mock_senior_interview_plan().picks),
         )
 
     def test_add_question_from_free_text_uses_structured_llm_output(self) -> None:

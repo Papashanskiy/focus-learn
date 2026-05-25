@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 
 DEFAULT_DB_PATH = Path("data/interview_prep.db")
-CURRENT_SCHEMA_VERSION = 12
+CURRENT_SCHEMA_VERSION = 13
 
 
 class MigrationStep(NamedTuple):
@@ -300,6 +300,8 @@ CREATE TABLE IF NOT EXISTS answer_evaluation_scores (
 CREATE TABLE IF NOT EXISTS session_outcomes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
+    outcome_type TEXT NOT NULL DEFAULT 'practice'
+        CHECK (outcome_type IN ('practice', 'calibration_baseline')),
     summary TEXT NOT NULL,
     strengths_json TEXT NOT NULL DEFAULT '[]',
     gaps_json TEXT NOT NULL DEFAULT '[]',
@@ -476,6 +478,12 @@ def init_db(connection: sqlite3.Connection) -> None:
         "sessions",
         "status",
         "TEXT NOT NULL DEFAULT 'in_progress' CHECK (status IN ('in_progress', 'completed', 'abandoned'))",
+    )
+    _ensure_column(
+        connection,
+        "session_outcomes",
+        "outcome_type",
+        "TEXT NOT NULL DEFAULT 'practice' CHECK (outcome_type IN ('practice', 'calibration_baseline'))",
     )
     _backfill_session_status(connection)
     connection.execute(

@@ -13,6 +13,9 @@ from interview_prep.services.readiness_service import ReadinessService
 from interview_prep.services.session_service import SessionService
 from interview_prep.services.stats_service import StatsService
 
+_NOTES_DRAFT_CONTEXT_TYPE = "tui-notes-draft"
+_NOTES_DRAFT_TITLE = "TUI notes draft"
+
 
 class ReadOnlyApplicationFacade:
     """JSON-safe read facade for future adapters such as a web UI."""
@@ -58,6 +61,16 @@ class ReadOnlyApplicationFacade:
     def readiness(self) -> dict[str, Any]:
         return self._readiness.snapshot().to_dict()
 
+    def competency_readiness(self) -> dict[str, Any]:
+        snapshot = self._readiness.snapshot()
+        return {
+            "generated_at": snapshot.generated_at.isoformat(timespec="seconds"),
+            "competency_count": snapshot.competency_count,
+            "covered_competency_count": snapshot.covered_competency_count,
+            "evaluated_competency_count": snapshot.evaluated_competency_count,
+            "competencies": [item.to_dict() for item in snapshot.competencies],
+        }
+
     def questions(
         self,
         topic_id: int | None = None,
@@ -83,7 +96,12 @@ class ReadOnlyApplicationFacade:
         return _to_plain_data(self._sessions.list_completed_sessions(limit=limit))
 
     def completed_session_detail(self, session_id: int) -> dict[str, Any] | None:
-        return _to_plain_data(self._sessions.get_completed_session_detail(session_id))
+        detail = self._sessions.get_completed_session_detail(session_id)
+        if detail is None:
+            return None
+        payload = _to_plain_data(detail)
+        payload["outcome"] = _to_plain_data(self._sessions.get_session_outcome(session_id))
+        return payload
 
     def learning_dialog_summaries(self, limit: int = 30) -> list[dict[str, Any]]:
         return _to_plain_data(self._learning.list_dialog_summaries(limit=limit))
@@ -106,6 +124,50 @@ class ReadOnlyApplicationFacade:
                 limit=limit,
             )
         )
+
+    def notebook(
+        self,
+        topic_id: int | None = None,
+        competency_slug: str | None = None,
+        session: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        query_limit = max(limit, 200) if competency_slug is not None else limit
+        entries = self._repository.list_notebook_entries(
+            topic_id=topic_id,
+            dialog_session_id=session,
+            limit=query_limit,
+        )
+        manual_session_id = _int_or_none(session)
+        if session is not None and manual_session_id is None:
+            notes = []
+        else:
+            notes = self._repository.list_manual_notes(
+                topic_id=topic_id,
+                session_id=manual_session_id,
+                limit=max(limit, 200),
+            )
+            notes = [_note for _note in notes if _is_named_manual_note(_note)]
+
+        competency_topic_ids: set[int] | None = None
+        if competency_slug is not None:
+            competency_topic_ids = set(self._repository.list_topic_ids_for_competency(competency_slug))
+            entries = [entry for entry in entries if entry.topic_id in competency_topic_ids]
+            notes = [note for note in notes if note.topic_id in competency_topic_ids]
+
+        entries = entries[:limit]
+        notes = notes[:limit]
+        return {
+            "filters": {
+                "topic_id": topic_id,
+                "competency": competency_slug,
+                "session": session,
+            },
+            "entry_count": len(entries),
+            "manual_note_count": len(notes),
+            "entries": _to_plain_data(entries),
+            "manual_notes": _to_plain_data(notes),
+        }
 
     def generated_artifacts(
         self,
@@ -135,3 +197,16 @@ def _to_plain_data(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_to_plain_data(item) for item in value]
     return value
+
+
+def _int_or_none(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _is_named_manual_note(note: Any) -> bool:
+    return note.context_type != _NOTES_DRAFT_CONTEXT_TYPE and note.title != _NOTES_DRAFT_TITLE

@@ -24,6 +24,7 @@ from interview_prep.domain.models import (
     Question,
     QuestionCompetencyLink,
     SESSION_STATUS_ABANDONED,
+    SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE,
     Session,
     SessionOutcome,
     SystemDesignArtifact,
@@ -852,6 +853,34 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
         repository.finish_session(session.id or 0, answered_at + timedelta(minutes=15))
         app.services.evaluations.evaluate_and_store_answer(answer, question, use_llm=False)
 
+    def seed_completed_baseline_outcome(self, app: InterviewPrepTUI, *, days_ago: int = 8) -> int:
+        repository = app.services.repository
+        completed_at = datetime.now() - timedelta(days=days_ago)
+        session = repository.create_session(
+            Session(
+                id=None,
+                topic_id=None,
+                started_at=completed_at - timedelta(minutes=25),
+                ended_at=None,
+                target_minutes=25,
+            )
+        )
+        repository.finish_session(session.id or 0, completed_at)
+        repository.upsert_session_outcome(
+            SessionOutcome(
+                id=None,
+                session_id=session.id or 0,
+                summary="Baseline calibration. Synthetic previous baseline.",
+                strengths=["Previous baseline signal."],
+                gaps=["Repeat baseline later."],
+                next_drills=["Повторить baseline через 7 дней."],
+                readiness_delta=0.18,
+                created_at=completed_at,
+                outcome_type=SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE,
+            )
+        )
+        return session.id or 0
+
     def test_feedback_quality_warning_formats_fallback_and_suspicious_payload(self) -> None:
         fallback = SimpleNamespace(
             raw_payload_json=(
@@ -886,7 +915,7 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertIn("Expected time: 45-60 min", center)
                     self.assertIn(
-                        "Primary action: Enter - начать system design mock interview; ID темы слева - ручной practice.",
+                        "Primary action: Enter - начать mock senior interview; ID темы слева - ручной practice.",
                         center,
                     )
                     self.assertIn("мало ответов: 0/3", center)
@@ -941,6 +970,180 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
             finally:
                 app.services.close()
 
+    async def test_tui_enter_starts_baseline_session_from_empty_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_today_baseline_start.db"))
+            try:
+                topic = app.services.repository.find_topic_by_slug("databases")
+                self.assertIsNotNone(topic)
+                assert topic is not None
+                app.services.repository.add_curriculum_topic(
+                    CurriculumTopic(
+                        id=None,
+                        topic_id=topic.id,
+                        slug="databases",
+                        title=topic.title,
+                        description=topic.description,
+                        level=topic.level,
+                        source="llm-seed",
+                        order_index=1,
+                    )
+                )
+                expected_plan = app.services.calibration.baseline_question_plan()
+
+                async with app.run_test(size=(120, 36)) as pilot:
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertIsNotNone(app.session)
+                    self.assertIsNone(app.session.topic_id)
+                    self.assertEqual(
+                        app.baseline_question_ids,
+                        tuple(pick.question.id for pick in expected_plan),
+                    )
+                    self.assertIsNotNone(app.question)
+                    self.assertEqual(app.question.id, expected_plan[0].question.id)
+                    self.assertIn("Baseline session", "\n".join(app.history))
+            finally:
+                app.services.close()
+
+    async def test_tui_today_shows_due_repeat_baseline_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_today_baseline_repeat_due.db"))
+            self.seed_one_practice_answer(app)
+            previous_session_id = self.seed_completed_baseline_outcome(app, days_ago=8)
+            try:
+                async with app.run_test(size=(120, 36)):
+                    center = app.question_text()
+
+                    self.assertIn("Recommended drill: повторная baseline practice session.", center)
+                    self.assertIn("Repeat baseline", app.readiness_text())
+                    self.assertIn(f"session #{previous_session_id}", app.readiness_text())
+                    self.assertIn("Action: /baseline-repeat - начать повторную baseline session.", app.readiness_text())
+                    self.assertIn("Primary action: Enter - начать повторную baseline session", center)
+            finally:
+                app.services.close()
+
+    async def test_tui_enter_starts_due_repeat_baseline_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_today_baseline_repeat_start.db"))
+            self.seed_one_practice_answer(app)
+            self.seed_completed_baseline_outcome(app, days_ago=8)
+            try:
+                expected_plan = app.services.calibration.baseline_question_plan()
+                async with app.run_test(size=(120, 36)) as pilot:
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "answering")
+                    self.assertIsNotNone(app.session)
+                    self.assertIsNone(app.session.topic_id)
+                    self.assertEqual(
+                        app.baseline_question_ids,
+                        tuple(pick.question.id for pick in expected_plan),
+                    )
+                    self.assertIsNotNone(app.question)
+                    self.assertEqual(app.question.id, expected_plan[0].question.id)
+                    self.assertIn("Baseline session", "\n".join(app.history))
+            finally:
+                app.services.close()
+
+    async def test_tui_baseline_review_shows_progress_and_remaining_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_today_baseline_progress.db"))
+            try:
+                topic = app.services.repository.find_topic_by_slug("databases")
+                self.assertIsNotNone(topic)
+                assert topic is not None
+                app.services.repository.add_curriculum_topic(
+                    CurriculumTopic(
+                        id=None,
+                        topic_id=topic.id,
+                        slug="databases",
+                        title=topic.title,
+                        description=topic.description,
+                        level=topic.level,
+                        source="llm-seed",
+                        order_index=1,
+                    )
+                )
+                expected_plan = app.services.calibration.baseline_question_plan()
+                expected_total = len(expected_plan)
+                self.assertGreater(expected_total, 1)
+
+                async with app.run_test(size=(120, 36)) as pilot:
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    input_bar = app.query_one("#input_bar", TextArea)
+
+                    input_bar.value = "Baseline ответ с кратким reasoning."
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    scoring_text = app.question_text()
+                    progress_text = f"Baseline progress: 1/{expected_total} answered, {expected_total - 1} remaining."
+                    self.assertEqual(app.mode, "scoring")
+                    self.assertIn(progress_text, scoring_text)
+                    self.assertIn(progress_text, app.history_text())
+
+                    input_bar.value = "4"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "answered")
+                    self.assertIn(progress_text, app.question_text())
+                    self.assertIn(progress_text, app.history_text())
+            finally:
+                app.services.close()
+
+    async def test_tui_baseline_finish_marks_session_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_today_baseline_outcome.db"))
+            try:
+                topic = app.services.repository.find_topic_by_slug("databases")
+                self.assertIsNotNone(topic)
+                assert topic is not None
+                app.services.repository.add_curriculum_topic(
+                    CurriculumTopic(
+                        id=None,
+                        topic_id=topic.id,
+                        slug="databases",
+                        title=topic.title,
+                        description=topic.description,
+                        level=topic.level,
+                        source="llm-seed",
+                        order_index=1,
+                    )
+                )
+
+                async with app.run_test(size=(120, 36)) as pilot:
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    self.assertIsNotNone(app.session)
+                    session_id = app.session.id or 0
+                    input_bar = app.query_one("#input_bar", TextArea)
+
+                    input_bar.value = "Baseline ответ с кратким evidence."
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    input_bar.value = "3"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    input_bar.value = "/finish-session"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    outcome = app.services.repository.get_session_outcome_for_session(session_id)
+                    self.assertIsNotNone(outcome)
+                    assert outcome is not None
+                    self.assertEqual(outcome.outcome_type, SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE)
+                    self.assertIn("Baseline calibration.", outcome.summary)
+                    self.assertIn("Type: calibration_baseline", app.question_text())
+            finally:
+                app.services.close()
+
     async def test_tui_today_action_buttons_are_visible_and_start_primary_drill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app = InterviewPrepTUI(str(Path(tmp) / "tui_today_actions.db"))
@@ -951,7 +1154,7 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     expected_labels = {
                         "today-start-drill": "Start Drill",
                         "today-review-weak-answer": "Review Weak Answer",
-                        "today-system-design": "System Design Mock",
+                        "today-system-design": "Mock Senior Interview",
                         "today-open-readiness": "Open Readiness",
                         "today-notebook": "Notebook",
                     }
@@ -962,8 +1165,12 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
 
                     self.assertTrue(clicked)
-                    self.assertEqual(app.mode, "system_design")
-                    self.assertIn("System Design Mock Interview", app.question_text())
+                    self.assertEqual(app.mode, "answering")
+                    self.assertIsNotNone(app.session)
+                    self.assertIsNone(app.session.topic_id)
+                    self.assertTrue(app.mock_interview_question_ids)
+                    self.assertEqual(app.question.id, app.mock_interview_question_ids[0])
+                    self.assertIn("Mock senior interview", "\n".join(app.history))
             finally:
                 app.services.close()
 
@@ -1001,15 +1208,23 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(input_bar.value, "")
                     self.assertEqual(app.mode, "select_topic")
                     self.assertIn(
-                        "Primary action: Enter - начать system design mock interview",
+                        "Primary action: Enter - начать mock senior interview",
                         app.question_text(),
                     )
 
                     await pilot.press("enter")
                     await pilot.pause()
 
-                    self.assertEqual(app.mode, "system_design")
-                    self.assertIn("System Design Mock Interview", app.question_text())
+                    expected_plan = app.services.calibration.mock_senior_interview_plan()
+                    self.assertEqual(app.mode, "answering")
+                    self.assertIsNotNone(app.session)
+                    self.assertIsNone(app.session.topic_id)
+                    self.assertEqual(
+                        app.mock_interview_question_ids,
+                        tuple(pick.question.id for pick in expected_plan.picks),
+                    )
+                    self.assertIsNotNone(app.question)
+                    self.assertEqual(app.question.id, expected_plan.picks[0].question.id)
             finally:
                 app.services.close()
 
@@ -1051,9 +1266,78 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("Score:", center)
                     self.assertIn("Evidence: answers 0; rubric 0;", center)
                     self.assertIn("Next action: Провести system design mock и сохранить transcript.", center)
+                    self.assertIn("[bold]Must fix before interview[/bold]", center)
+                    self.assertIn("Провести один `/mock-interview`", center)
                     self.assertIn("[bold]Readiness[/bold]", side_panel)
+                    self.assertIn("/mock-interview", side_panel)
                     self.assertIn("/readiness", side_panel)
                     self.assertIn("/practice", side_panel)
+            finally:
+                app.services.close()
+
+    async def test_tui_mock_interview_command_starts_from_readiness_without_topic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_mock_interview_from_readiness.db"))
+            self.seed_one_practice_answer(app)
+            try:
+                expected_plan = app.services.calibration.mock_senior_interview_plan()
+                async with app.run_test(size=(120, 36)) as pilot:
+                    input_bar = app.query_one("#input_bar", TextArea)
+                    input_bar.value = "/readiness"
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    self.assertEqual(app.mode, "readiness")
+
+                    input_bar.value = "/mock-interview"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "answering")
+                    self.assertIsNotNone(app.session)
+                    self.assertIsNone(app.session.topic_id)
+                    self.assertEqual(
+                        app.mock_interview_question_ids,
+                        tuple(pick.question.id for pick in expected_plan.picks),
+                    )
+                    self.assertIsNotNone(app.question)
+                    self.assertEqual(app.question.id, expected_plan.picks[0].question.id)
+                    self.assertIn("Mock senior interview", "\n".join(app.history))
+            finally:
+                app.services.close()
+
+    async def test_tui_mock_interview_review_shows_section_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_mock_interview_progress.db"))
+            self.seed_one_practice_answer(app)
+            try:
+                expected_plan = app.services.calibration.mock_senior_interview_plan()
+                self.assertEqual(expected_plan.sections, ("coding", "theory", "system_design", "debugging"))
+                async with app.run_test(size=(120, 36)) as pilot:
+                    input_bar = app.query_one("#input_bar", TextArea)
+                    input_bar.value = "/mock-interview"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mock_interview_sections, expected_plan.sections)
+                    input_bar.value = "Разбираю задачу, проговариваю constraints и tradeoffs."
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    progress_text = (
+                        "Mock interview progress: section Coding (1/4), "
+                        "remaining sections: Theory, System Design, Debugging."
+                    )
+                    self.assertEqual(app.mode, "scoring")
+                    self.assertIn(progress_text, app.question_text())
+                    self.assertIn(progress_text, app.history_text())
+
+                    input_bar.value = "4"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "answered")
+                    self.assertIn(progress_text, app.question_text())
+                    self.assertIn(progress_text, app.history_text())
             finally:
                 app.services.close()
 

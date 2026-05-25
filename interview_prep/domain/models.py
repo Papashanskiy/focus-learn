@@ -13,6 +13,13 @@ SESSION_STATUSES = (
     SESSION_STATUS_ABANDONED,
 )
 
+SESSION_OUTCOME_TYPE_PRACTICE = "practice"
+SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE = "calibration_baseline"
+SESSION_OUTCOME_TYPES = (
+    SESSION_OUTCOME_TYPE_PRACTICE,
+    SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE,
+)
+
 QUESTION_SOURCE_QUALITY_PENDING_REVIEW = "pending_review"
 QUESTION_SOURCE_QUALITY_ACCEPTED = "accepted"
 QUESTION_SOURCE_QUALITY_ARCHIVED = "archived"
@@ -156,6 +163,7 @@ class SessionOutcome:
     next_drills: list[str]
     readiness_delta: float
     created_at: datetime
+    outcome_type: str = SESSION_OUTCOME_TYPE_PRACTICE
 
 
 @dataclass(frozen=True)

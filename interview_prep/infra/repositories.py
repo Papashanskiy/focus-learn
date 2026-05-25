@@ -197,6 +197,7 @@ def _json_string_list(value: str) -> list[str]:
 
 
 def _session_outcome(row: sqlite3.Row) -> SessionOutcome:
+    outcome_type = row["outcome_type"] if "outcome_type" in row.keys() else "practice"
     return SessionOutcome(
         id=row["id"],
         session_id=row["session_id"],
@@ -206,6 +207,7 @@ def _session_outcome(row: sqlite3.Row) -> SessionOutcome:
         next_drills=_json_string_list(row["next_drills_json"]),
         readiness_delta=float(row["readiness_delta"]),
         created_at=_dt(row["created_at"]),
+        outcome_type=outcome_type,
     )
 
 
@@ -1726,6 +1728,7 @@ class SQLiteRepository:
                 INSERT INTO session_outcomes
                     (
                         session_id,
+                        outcome_type,
                         summary,
                         strengths_json,
                         gaps_json,
@@ -1733,8 +1736,9 @@ class SQLiteRepository:
                         readiness_delta,
                         created_at
                     )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
+                    outcome_type = excluded.outcome_type,
                     summary = excluded.summary,
                     strengths_json = excluded.strengths_json,
                     gaps_json = excluded.gaps_json,
@@ -1744,6 +1748,7 @@ class SQLiteRepository:
                 """,
                 (
                     outcome.session_id,
+                    outcome.outcome_type,
                     outcome.summary,
                     json.dumps(outcome.strengths, ensure_ascii=False),
                     json.dumps(outcome.gaps, ensure_ascii=False),
@@ -1763,6 +1768,7 @@ class SQLiteRepository:
             SELECT
                 id,
                 session_id,
+                outcome_type,
                 summary,
                 strengths_json,
                 gaps_json,
@@ -1782,6 +1788,7 @@ class SQLiteRepository:
             SELECT
                 id,
                 session_id,
+                outcome_type,
                 summary,
                 strengths_json,
                 gaps_json,
@@ -1795,6 +1802,33 @@ class SQLiteRepository:
         ).fetchone()
         return _session_outcome(row) if row else None
 
+    def get_latest_completed_session_outcome_by_type(self, outcome_type: str) -> dict | None:
+        row = self.connection.execute(
+            """
+            SELECT
+                so.id,
+                so.session_id,
+                so.outcome_type,
+                so.summary,
+                so.strengths_json,
+                so.gaps_json,
+                so.next_drills_json,
+                so.readiness_delta,
+                so.created_at,
+                s.started_at,
+                s.ended_at
+            FROM session_outcomes so
+            JOIN sessions s ON s.id = so.session_id
+            WHERE s.ended_at IS NOT NULL
+              AND s.status = 'completed'
+              AND so.outcome_type = ?
+            ORDER BY s.ended_at DESC, s.id DESC
+            LIMIT 1
+            """,
+            (outcome_type,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def list_completed_session_outcomes_for_readiness_trend(self, limit: int = 200) -> list[dict]:
         if limit <= 0:
             return []
@@ -1802,6 +1836,7 @@ class SQLiteRepository:
             """
             SELECT
                 so.session_id,
+                so.outcome_type,
                 so.readiness_delta,
                 so.created_at AS outcome_created_at,
                 s.started_at,

@@ -19,16 +19,18 @@
 - Для ручных заметок добавлен storage foundation: domain-модель `ManualNote`, SQLite-таблица `manual_notes` и repository-методы чтения по topic/session/context; TUI notes editor сохраняет и восстанавливает draft по session/topic/global context.
 - Ручная UX-регрессия `learn` до выбора topic закрыта: вход запускает новую topicless learning-сессию без восстановления прошлых topic-bound реплик; вход в конспект обучения уже заметен на стартовом/topic экране через Notebook action и подсказку, из history learning dialogs и из `/materials` по текущей или выбранной теме.
 - Переключение TUI между `learn`/`system-design`/`practice` через клики и slash-команды больше не наслаивает focused modes: текущий focused mode разворачивается до practice-context перед входом в другой основной режим.
-- Для будущего web UI есть read-only WSGI adapter skeleton поверх `ReadOnlyApplicationFacade`: `/api/smoke`, `/api/dashboard` и health endpoints без замены TUI.
+- Для будущего web UI есть read-only WSGI adapter skeleton поверх `ReadOnlyApplicationFacade`: `/api/smoke`, `/api/dashboard`, `/api/readiness`, `/api/competencies`, `/api/sessions/<id>`, `/api/notebook`, health endpoints и simple HTML diagnostics smoke page без замены TUI.
 - Основной Ollama runtime по умолчанию переключен на локальную модель `gemma4:e4b`; config/env overrides и fallback при недоступности модели сохранены.
 - Продукт уже начал измерять подготовку через senior competencies и evidence: taxonomy зафиксирована, добавлена domain-модель, базовая SQLite-таблица/seed competencies, repository API, таблица связи `question_competencies`, repository-методы чтения/перезаписи привязок вопросов и seed links для bootstrap-вопросов, CLI `questions` и TUI practice header показывают competencies вопроса. Rubric dimensions для senior answers зафиксированы как contract; отдельные system design rubric dimensions сохранены и после `/sd-feedback` transcript/artifacts оцениваются deterministic rubric evaluation с сохранением scores; TUI system design screen заранее показывает пустые requirements/API/data/risks sections перед итоговым feedback, `/sd-checkpoint` дает короткую промежуточную interviewer-проверку без final feedback artifact/evaluation, `/sd-pressure` задает targeted pressure follow-up по senior failure modes, а `/history system-design` показывает сохраненный final feedback и rubric scores; structured evaluation service умеет strict LLM JSON и fallback heuristic при недоступной Ollama/невалидном JSON, practice flow сохраняет evaluation, TUI review показывает rubric scores после self-score, а `ReadinessService` считает per-competency readiness score и общий evidence-based readiness summary без абсолютной оценки кандидата; CLI `stats` показывает `Senior readiness` и top gaps, а TUI `/readiness` показывает focused dashboard по competencies, score, evidence count и next action.
-- Read-only facade теперь отдает JSON-safe список competencies и competency links вопросов для будущих dashboard/API слоев без изменения web adapter.
+- Read-only facade теперь отдает JSON-safe список competencies, competency links вопросов и web endpoints `/api/readiness`/`/api/competencies`/`/api/sessions/<id>`/`/api/notebook` для будущих dashboard/API слоев без замены TUI.
 - CLI `evaluations --answer <id>` показывает сохраненную structured rubric evaluation по ответу: summary, source, average score, per-dimension evidence/gaps и next drills.
 - AI feedback prompt уже ужесточен против приписывания кандидату лишних пунктов; есть weak-answer eval cases, unit prompt guard и service-level suspicious flag для praise без evidence из candidate answer. `feedback_quality_flags` сохраняются в payload последней structured evaluation, TUI review показывает предупреждение, если feedback помечен как fallback или suspicious, `/recheck-feedback` повторно запрашивает feedback для последнего ответа с более строгим prompt, а regression-тест фиксирует низкие rubric scores для ответа "не знаю" и suspicious-flag для reference-only praise.
 - Сессии уже сохраняются и видны в history; базовый статус `in_progress`/`completed`/`abandoned` хранится в SQLite с legacy-backfill, а session outcome уже имеет domain-модель, SQLite/repository storage foundation, deterministic generation после answered practice session и показывается на TUI ended screen после `/quit` или истечения target time, через `/finish-session` без выхода из TUI, в `/history <session-id>` и через CLI `session-summary <id>`.
+- Calibration baseline уже умеет выбирать до 5 accepted questions по разным competencies и запускать из Today empty-state mixed practice session, которая идет по выбранному service-level плану; outcome сохраняется с типом `calibration_baseline`, чтобы readiness/trend отличал первичную оценку от обычной practice. Mock senior interview запускается без ручного выбора topic из Today/readiness, смешивает coding/theory/system design/debugging и показывает section progress в practice review flow.
+- Readiness snapshot теперь включает `must_fix_drill` для top gaps, а CLI `stats` и TUI `/readiness` показывают список `Must fix before interview` с конкретными drills перед интервью.
 - CLI `curriculum-status` показывает read-only покрытие generated curriculum: counts curriculum topics/subtopics/objectives/questions и пустые зоны bootstrap/fallback.
 - Generated content уже появляется в приложении; для generated questions добавлен первый quality gate против очевидных дублей внутри темы, storage foundation source_quality/status (`pending_review`/`accepted`/`archived`), CLI `questions-review` и TUI `/questions-review` для pending review/accept/archive. Background question generation уже просит LLM вернуть tag/competency slugs и безопасно привязывает tags/known competencies к новым вопросам; generated materials/scenarios можно архивировать с optional reason; еще нет оценки полезности generated artifacts.
-- TUI превратился в крупный монолит; дальнейшее развитие senior workflow требует выделить mode controllers, renderers и background orchestration, чтобы новые фичи не усложняли один файл.
+- TUI refactor уже выделил pure render helpers, practice/learning/system-design controllers и content worker orchestration; дальнейшие TUI-фичи должны сохранять этот контракт и не возвращать state transitions обратно в монолитный `ui/tui.py`.
 
 ## Product principles
 
@@ -50,6 +52,22 @@
 
 ## Done
 
+- [x] Calibration: service-level repeat baseline status определяет последнюю completed baseline, 7-day due date и последний readiness delta.
+- [x] Calibration: readiness показывает "must fix before interview" список из top gaps с конкретными drills.
+- [x] Mock interview progress: TUI practice review показывает текущую section и remaining sections для mixed mock senior interview.
+- [x] Mock interview TUI: Today/readiness action starts topicless mixed mock senior interview from the service-level plan.
+- [x] Mock interview session: запуск mixed practice session из service-level mock interview plan без ручного выбора topic.
+- [x] Calibration: service-level mock senior interview plan смешивает coding/theory/system design/debugging sections без ручного выбора topic.
+- [x] Calibration: baseline outcome сохраняется с marker/type для readiness trend и summary первичной оценки.
+- [x] Calibration: baseline practice session запускается из Today empty-state и использует service-level план вопросов по разным competencies.
+- [x] Web API: adapter boundaries задокументированы для будущего web UI без прямого доступа adapter к repository.
+- [x] Web API: simple HTML smoke page добавлена как diagnostics surface для read-only adapter, без замены TUI.
+- [x] Web API: query param validation для новых endpoints покрыта regression-тестом `/api/notebook`, malformed numeric params возвращают `400`.
+- [x] Web API: `/api/sessions/<id>` отдает completed session detail и сохраненный outcome.
+- [x] Web API: `/api/notebook` отдает AI notebook entries и named manual notes с filters topic/competency/session.
+- [x] Web API: `/api/competencies` отдает read-only competency readiness metadata со score/coverage.
+- [x] Web API: `/api/readiness` отдает read-only readiness snapshot поверх `ReadinessService`.
+- [x] TUI refactor: roadmap/log зафиксировали контракт уже выделенных render/controller/worker модулей после серии extraction steps.
 - [x] TUI refactor: system-design entry state snapshot вынесен в pure controller helper с тестами без Textual harness.
 - [x] TUI refactor: content worker finish/result status transition вынесен в `ContentWorkerOrchestrator` без изменения artifact side effects.
 - [x] TUI refactor: content worker loop/process-next-job orchestration вынесен в `ContentWorkerOrchestrator` без изменения TUI thread handoff.
@@ -523,24 +541,35 @@
 - [x] TUI stability: исправить RuntimeWarning `call_from_thread` в тестах background worker/system design flow.
 - [x] TUI stability: добавить regression-тест, что TUI unmount не оставляет running worker state.
 - [x] TUI stability: добавить smoke test для переключения Today -> Practice -> Learn -> System Design -> Readiness -> Practice.
-- [ ] TUI refactor: обновить `ROADMAP.md` и `DEVELOPMENT_LOG.md` после каждого выделения модуля, чтобы не терять поведенческий контракт.
+- [x] TUI refactor: обновить `ROADMAP.md` и `DEVELOPMENT_LOG.md` после каждого выделения модуля, чтобы не терять поведенческий контракт.
 
 ### 19. Web/API foundations for future UI
 
-- [ ] Web API: добавить read-only endpoint `/api/readiness` поверх `ReadinessService`.
-- [ ] Web API: добавить read-only endpoint `/api/competencies` со score/coverage metadata.
-- [ ] Web API: добавить read-only endpoint `/api/sessions/<id>` для completed session detail и outcome.
-- [ ] Web API: добавить read-only endpoint `/api/notebook` с filters topic/competency/session.
-- [ ] Web API: добавить tests на query param validation для новых endpoints.
-- [ ] Web API: добавить simple HTML smoke page только как diagnostics, без замены TUI.
-- [ ] Web API: документировать adapter boundaries, чтобы будущий web UI не обращался напрямую к repository.
+- [x] Web API: добавить read-only endpoint `/api/readiness` поверх `ReadinessService`.
+- [x] Web API: добавить read-only endpoint `/api/competencies` со score/coverage metadata.
+- [x] Web API: добавить read-only endpoint `/api/sessions/<id>` для completed session detail и outcome.
+- [x] Web API: добавить read-only endpoint `/api/notebook` с filters topic/competency/session.
+- [x] Web API: добавить tests на query param validation для новых endpoints.
+- [x] Web API: добавить simple HTML smoke page только как diagnostics, без замены TUI.
+- [x] Web API: документировать adapter boundaries, чтобы будущий web UI не обращался напрямую к repository.
 
 ### 20. Calibration and real interview readiness
 
-- [ ] Calibration: добавить baseline session flow из 5 вопросов по разным competencies для первичной оценки.
-- [ ] Calibration: добавить mock senior interview mode, который смешивает coding/theory/system design/debugging без ручного выбора topic.
-- [ ] Calibration: добавить "must fix before interview" список из top gaps с конкретными drills.
+- [x] Calibration: добавить baseline session flow из 5 вопросов по разным competencies для первичной оценки.
+  - [x] Baseline selection: добавить service-level план из 5 accepted questions по разным competencies без подключения TUI/session flow.
+  - [x] Baseline session: добавить запуск baseline practice session, который использует выбранный service-level план.
+  - [x] Baseline session: показывать baseline progress/remaining questions в TUI review flow.
+  - [x] Baseline session: сохранять outcome marker/summary, чтобы readiness отличал первичную baseline-оценку от обычной practice.
+- [x] Calibration: добавить mock senior interview mode, который смешивает coding/theory/system design/debugging без ручного выбора topic.
+  - [x] Mock interview planning: добавить service-level deterministic plan, который выбирает accepted questions для coding/theory/system design/debugging без ручного выбора topic.
+  - [x] Mock interview session: запускать mixed practice session из service-level mock interview plan.
+  - [x] Mock interview TUI: добавить Today/readiness action для старта mock senior interview без ручного выбора topic.
+  - [x] Mock interview progress: показывать текущую section и remaining sections в practice review flow.
+- [x] Calibration: добавить "must fix before interview" список из top gaps с конкретными drills.
 - [ ] Calibration: добавить повторную baseline session через 7 дней и сравнение readiness delta.
+  - [x] Baseline repeat status: service-level статус определяет последнюю completed baseline, due date через 7 дней и последний readiness delta.
+  - [x] Baseline repeat action: Today/readiness показывает повторную baseline session как action, когда статус due.
+  - [ ] Baseline delta comparison: после repeat baseline сравнивать readiness delta с предыдущей baseline и показывать summary.
 - [ ] Calibration: добавить export `interview-report` в Markdown: strengths, gaps, evidence answers, next plan.
 - [ ] Calibration: добавить manual override для rubric score, чтобы пользователь мог исправить ошибочную AI-оценку.
 - [ ] Calibration: добавить tests, что manual override влияет на readiness, но сохраняет original AI score для аудита.

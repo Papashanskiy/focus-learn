@@ -6,6 +6,7 @@ from interview_prep.infra.database import DEFAULT_DB_PATH, connect, init_db
 from interview_prep.infra.llm import OllamaClient, ResilientLLMClient
 from interview_prep.infra.repositories import SQLiteRepository
 from interview_prep.services.content_generation_service import ContentGenerationService
+from interview_prep.services.calibration_service import CalibrationService
 from interview_prep.services.curriculum_service import CurriculumService
 from interview_prep.services.evaluation_service import EvaluationService
 from interview_prep.services.question_service import QuestionService
@@ -37,6 +38,7 @@ class AppServices:
             )
         )
         self.content_generation = ContentGenerationService(self.repository, self.llm)
+        self.calibration = CalibrationService(self.repository)
         self.curriculum = CurriculumService(self.repository, self.llm)
         self.questions = QuestionService(self.repository, self.llm)
         self.evaluations = EvaluationService(self.repository, self.llm)

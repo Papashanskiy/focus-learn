@@ -1,5 +1,124 @@
 # Development Log
 
+## 2026-05-25
+
+### Calibration repeat TUI action
+
+- Закрыт roadmap leaf про repeat baseline action: Today panel теперь, когда completed calibration baseline старше 7 дней, показывает повторную baseline practice session как primary action и Enter запускает новый baseline session.
+- `/readiness` показывает due repeat baseline в отдельном Calibration-блоке с последней session/date/readiness delta и action `/baseline-repeat`; команда запускает baseline только когда repeat действительно due.
+- Проверки: `.venv/bin/python -m unittest tests.test_tui.TUITests.test_tui_today_shows_due_repeat_baseline_action tests.test_tui.TUITests.test_tui_enter_starts_due_repeat_baseline_session tests.test_tui.TUITests.test_tui_start_screen_shows_today_recommended_readiness_drill tests.test_tui.TUITests.test_tui_enter_starts_baseline_session_from_empty_state tests.test_tui.TUITests.test_tui_readiness_screen_lists_competency_scores_and_actions -v`, `.venv/bin/python -m unittest tests.test_tui.TUIHelperTests.test_command_palette_text_lists_core_commands -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Calibration repeat baseline status
+
+- Первый unchecked roadmap item про повторную baseline через 7 дней оказался слишком крупным для одной итерации, поэтому он разбит в `## Next` на service status, TUI action и delta comparison leaves.
+- Закрыт первый leaf: `CalibrationService.baseline_repeat_status()` возвращает последнюю completed calibration baseline, следующий due time через 7 дней, последний `readiness_delta` и флаг доступности repeat baseline.
+- Проверки: `.venv/bin/python -m unittest tests.test_services.ServiceTests.test_calibration_baseline_repeat_status_uses_seven_day_interval tests.test_services.ServiceTests.test_calibration_starts_mixed_baseline_session_from_plan -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Calibration must-fix readiness drills
+
+- Закрыт roadmap leaf про "must fix before interview": `ReadinessGap` теперь содержит конкретный `must_fix_drill` для top gaps, а serialized readiness snapshot отдает его рядом с `next_action`.
+- CLI `stats` и TUI `/readiness` показывают отдельный список `Must fix before interview` по top readiness gaps, чтобы перед интервью был короткий список конкретных drills.
+- Проверки: `.venv/bin/python -m unittest tests.test_services.ServiceTests.test_readiness_service_builds_overall_summary_without_absolute_claim tests.test_services.ServiceTests.test_readiness_recommends_low_rubric_topic_as_first_drill tests.test_cli_flow.CLIFlowTests.test_stats_command_shows_senior_readiness_top_gaps tests.test_tui.TUITests.test_tui_readiness_screen_lists_competency_scores_and_actions -v`, `.venv/bin/python -m unittest tests.test_cli_flow.CLIFlowTests.test_stats_command_shows_senior_readiness_top_gaps -v`, `.venv/bin/python -m compileall interview_prep`. Первая попытка targeted suite использовала неверный class name `CliFlowTests` и завершилась loader error для этого target; исправленный `CLIFlowTests` прошел.
+
+### Mock senior interview progress UI
+
+- Закрыт roadmap leaf про mock interview progress: TUI хранит ordered sections из `MockSeniorInterviewSessionPlan` и показывает текущую section plus remaining sections в центральном practice review flow и правой practice-панели.
+- Родительский roadmap item про mock senior interview mode закрыт, потому что planning/session/TUI action/progress leaves завершены.
+- Проверки: `.venv/bin/python -m unittest tests.test_tui.TUITests.test_tui_mock_interview_review_shows_section_progress tests.test_tui.TUITests.test_tui_mock_interview_command_starts_from_readiness_without_topic tests.test_tui.TUITests.test_tui_today_enter_starts_recommended_drill tests.test_tui.TUITests.test_tui_baseline_review_shows_progress_and_remaining_questions -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Mock senior interview TUI action
+
+- Закрыт roadmap leaf про Today/readiness action: primary Today drill при system-design readiness gap и кнопка `Mock Senior Interview` запускают topicless mixed practice session из `CalibrationService.start_mock_senior_interview_session()`.
+- Добавлена slash-команда `/mock-interview`, доступная из `/readiness`, чтобы начать mixed mock senior interview без ручного выбора topic; section progress остается следующим открытым leaf.
+- Проверки: `.venv/bin/python -m unittest tests.test_tui.TUIHelperTests.test_command_palette_text_lists_core_commands tests.test_tui.TUITests.test_tui_start_screen_shows_today_recommended_readiness_drill tests.test_tui.TUITests.test_tui_today_action_buttons_are_visible_and_start_primary_drill tests.test_tui.TUITests.test_tui_today_enter_starts_recommended_drill tests.test_tui.TUITests.test_tui_readiness_screen_lists_competency_scores_and_actions tests.test_tui.TUITests.test_tui_mock_interview_command_starts_from_readiness_without_topic -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Mock senior interview session
+
+- Закрыт roadmap leaf про запуск mock senior interview session: `CalibrationService.start_mock_senior_interview_session()` создает topicless mixed practice session из deterministic mock interview plan и возвращает ordered sections/question ids.
+- TUI action и progress UI остаются следующими открытыми leaves; текущий шаг только добавляет service-level session start contract.
+- Проверки: `.venv/bin/python -m unittest tests.test_services.ServiceTests.test_mock_senior_interview_plan_mixes_interview_sections tests.test_services.ServiceTests.test_calibration_starts_mixed_mock_senior_interview_session_from_plan tests.test_services.ServiceTests.test_calibration_starts_mixed_baseline_session_from_plan -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Mock senior interview plan
+
+- Первый unchecked roadmap item про mock senior interview mode оказался слишком крупным для одного безопасного шага, поэтому он разбит в `## Next` на smaller mock-interview leaves.
+- Закрыт первый leaf: `CalibrationService.mock_senior_interview_plan()` строит deterministic plan из accepted questions для sections coding/theory/system design/debugging без ручного выбора topic.
+- Текущий шаг не запускает TUI/session flow; следующие leaves должны подключить plan к mixed practice session, Today/readiness action и progress UI.
+- Проверки: `.venv/bin/python -m unittest tests.test_services.ServiceTests.test_mock_senior_interview_plan_mixes_interview_sections tests.test_services.ServiceTests.test_calibration_baseline_plan_picks_five_distinct_competencies tests.test_services.ServiceTests.test_calibration_starts_mixed_baseline_session_from_plan -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Calibration baseline outcome marker
+
+- Закрыт roadmap leaf про baseline outcome marker: `session_outcomes` получил `outcome_type` с default `practice`, а baseline completion маркирует outcome как `calibration_baseline` и добавляет summary marker с planned question count.
+- Readiness weekly trend теперь сохраняет `baseline_session_count`, чтобы primary baseline sessions отличались от обычных practice outcomes в readiness payload.
+- Проверки: `.venv/bin/python -m unittest tests.test_services.ServiceTests.test_init_db_creates_session_outcome_storage tests.test_services.ServiceTests.test_repository_upserts_and_reads_session_outcome tests.test_services.ServiceTests.test_finish_session_generates_session_outcome_from_scores_and_evaluations tests.test_services.ServiceTests.test_calibration_marks_baseline_session_outcome tests.test_services.ServiceTests.test_readiness_service_builds_weekly_trend_from_completed_session_outcomes tests.test_tui.TUITests.test_tui_baseline_finish_marks_session_outcome -v`, `.venv/bin/python -m unittest tests.test_services.ServiceTests.test_calibration_baseline_plan_picks_five_distinct_competencies tests.test_services.ServiceTests.test_calibration_baseline_plan_prefers_unanswered_questions tests.test_services.ServiceTests.test_calibration_starts_mixed_baseline_session_from_plan tests.test_tui.TUITests.test_tui_enter_starts_baseline_session_from_empty_state tests.test_tui.TUITests.test_tui_baseline_review_shows_progress_and_remaining_questions tests.test_tui.TUITests.test_tui_baseline_finish_marks_session_outcome -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Calibration baseline progress UI
+
+- Закрыт roadmap leaf про baseline progress в TUI review flow: активная baseline session теперь показывает счетчик вида `Baseline progress: 1/5 answered, 4 remaining.` в центральном practice экране и правой practice-панели.
+- Regression-тест проходит первый baseline question до scoring/review и проверяет, что progress/remaining видны на обоих шагах.
+- Проверки: `.venv/bin/python -m unittest tests.test_tui.TUITests.test_tui_enter_starts_baseline_session_from_empty_state tests.test_tui.TUITests.test_tui_baseline_review_shows_progress_and_remaining_questions -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Calibration baseline session launch
+
+- Закрыт roadmap leaf про запуск baseline practice session: `CalibrationService.start_baseline_session()` создает mixed practice session без topic и возвращает выбранный service-level план вопросов.
+- Today empty-state `первая baseline practice session` теперь по Enter/Start Drill запускает baseline session и TUI берет следующие вопросы из сохраненного planned question id list, а не из обычной weak-topic сортировки.
+- Progress/remaining UI и outcome marker остаются следующими открытыми baseline leaves.
+- Проверки: `.venv/bin/python -m unittest tests.test_services.ServiceTests.test_calibration_baseline_plan_picks_five_distinct_competencies tests.test_services.ServiceTests.test_calibration_baseline_plan_prefers_unanswered_questions tests.test_services.ServiceTests.test_calibration_starts_mixed_baseline_session_from_plan -v`, `.venv/bin/python -m unittest tests.test_tui.TUITests.test_tui_start_screen_shows_baseline_empty_state_when_curriculum_exists tests.test_tui.TUITests.test_tui_enter_starts_baseline_session_from_empty_state -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Calibration baseline selection
+
+- Первый unchecked roadmap item про baseline session flow оказался слишком крупным для одного безопасного шага, поэтому он разбит в `## Next` на smaller baseline leaves.
+- Закрыт первый leaf: `CalibrationService.baseline_question_plan()` выбирает до 5 accepted questions по разным competencies, предпочитая primary competency links и unanswered questions.
+- TUI/session execution для baseline остается открытым следующим leaf; текущий шаг только фиксирует service-level deterministic question plan.
+- Проверки: `.venv/bin/python -m unittest tests.test_services.ServiceTests.test_calibration_baseline_plan_picks_five_distinct_competencies tests.test_services.ServiceTests.test_calibration_baseline_plan_prefers_unanswered_questions -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Web API adapter boundaries
+
+- Закрыт roadmap leaf про adapter boundaries: README и CLAUDE теперь фиксируют, что будущий web UI должен идти через `ReadOnlyApplicationFacade` или явные service/use-case methods, а не напрямую в `SQLiteRepository`.
+- Контракт WSGI adapter оставлен тонким: HTTP path/query validation, вызов facade method и JSON/HTML diagnostics serialization; write-сценарии должны сначала появляться в service layer с тестами.
+- Проверки: `.venv/bin/python -m compileall interview_prep`, `rg -n "Web adapter boundary|Web adapter boundaries|\\[ \\] Web API: документировать adapter boundaries" README.md CLAUDE.md ROADMAP.md`.
+
+### Web API HTML smoke page
+
+- Закрыт roadmap leaf про simple HTML smoke page: read-only WSGI adapter теперь отдает `/` и `/smoke` как минимальную diagnostics-страницу с counters и ссылками на JSON endpoints.
+- Страница явно подписана как diagnostics для будущего web adapter и не меняет основной продуктовый контракт: TUI остается primary interface, а endpoint не выполняет write-операций.
+- Проверки: `.venv/bin/python -m unittest tests.test_web -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Web API query param validation tests
+
+- Закрыт roadmap leaf про query param validation для новых endpoints: добавлен regression-тест `/api/notebook`, который проверяет `400 Bad Request` для нечислового `topic`, `limit` вне диапазона и сохранение read-only counters.
+- WSGI adapter теперь валидирует numeric query params `/api/notebook` строго: `topic=...` должен быть числом, а `limit` должен быть в диапазоне 1..100; валидный запрос продолжает отдавать notebook payload.
+- Проверки: `.venv/bin/python -m unittest tests.test_web -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Web API notebook endpoint
+
+- Закрыт roadmap leaf про read-only `/api/notebook`: WSGI adapter теперь отдает notebook payload из `ReadOnlyApplicationFacade.notebook()` с `entries`, `manual_notes`, counts и примененными filters.
+- Endpoint поддерживает filters `topic`, `competency`, `session`; competency фильтрует через linked question topics, session фильтрует AI entries по `dialog_session_id` и manual notes по numeric `session_id`, а internal TUI draft notes скрываются.
+- Проверки: `.venv/bin/python -m unittest tests.test_web -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Web API session detail endpoint
+
+- Закрыт roadmap leaf про read-only `/api/sessions/<id>`: WSGI adapter теперь отдает completed practice session detail из `ReadOnlyApplicationFacade.completed_session_detail()` вместе с сохраненным `outcome`.
+- Endpoint возвращает `404 session_not_found` для отсутствующей или не completed practice session и `400 invalid_session_id` для нечислового id; payload остается read-only и не меняет counters.
+- Проверки: `.venv/bin/python -m unittest tests.test_web -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Web API competencies endpoint
+
+- Закрыт roadmap leaf про read-only `/api/competencies`: WSGI adapter теперь отдает competency readiness metadata из `ReadOnlyApplicationFacade.competency_readiness()` поверх существующих `ReadinessService` aggregates.
+- Payload включает counts, `generated_at` и per-competency score/coverage metadata: linked/answered questions, answer coverage, rubric/self-score averages, readiness score и reasons.
+- Проверки: `.venv/bin/python -m unittest tests.test_web -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### Web API readiness endpoint
+
+- Закрыт roadmap leaf про read-only `/api/readiness`: WSGI adapter теперь отдает JSON-safe readiness snapshot напрямую из `ReadOnlyApplicationFacade.readiness()`, поверх существующего `ReadinessService`.
+- Добавлен regression-тест web adapter, который проверяет структуру readiness payload и что endpoint не меняет session/answer counters.
+- Проверки: `.venv/bin/python -m unittest tests.test_web -v`, `.venv/bin/python -m compileall interview_prep`.
+
+### TUI refactor contract documentation
+
+- Закрыт roadmap leaf про обновление `ROADMAP.md` и `DEVELOPMENT_LOG.md` после выделения TUI-модулей: текущий статус roadmap теперь фиксирует, что pure render helpers, practice/learning/system-design controllers и content worker orchestration уже выделены из `ui/tui.py`.
+- Поведенческий контракт для следующих TUI-изменений: новые state transitions должны оставаться в соответствующих controller/orchestration модулях, а `InterviewPrepTUI` должен удерживать UI/storage side effects и Textual wiring.
+- Проверки: `.venv/bin/python -m compileall interview_prep`, `rg -n "\\[ \\].*TUI refactor: обновить|TUI refactor: roadmap/log|TUI refactor contract documentation" ROADMAP.md DEVELOPMENT_LOG.md`. Первая попытка через `python -m compileall interview_prep` не запускалась, потому что в shell нет команды `python`.
+
 ## 2026-05-22
 
 ### TUI mode chain smoke regression

@@ -26,7 +26,7 @@
 - Автоматическая фоновая генерация дополнительных вопросов из TUI, когда по выбранной теме мало контента.
 - Статистика: сессии, ответы, последние сессии, динамика по темам.
 - Read-only TUI history browser завершенных practice sessions по topic/session/date с просмотром вопроса, ответа, self-score, эталона и AI feedback; `/history learning` показывает saved learning dialogs по session/context, `/history learning <session-id>` открывает конкретный learning dialog read-only, `/history learning <topic-id> <YYYY-MM-DD>` оставлен для legacy-группировки по дате, а `/history system-design` показывает сохраненный final feedback и rubric scores system design mock sessions.
-- Минимальный read-only WSGI adapter skeleton для будущего web UI: `/api/smoke`, `/api/dashboard` и health endpoints поверх существующего service facade.
+- Минимальный read-only WSGI adapter skeleton для будущего web UI: `/api/smoke`, `/api/dashboard`, `/api/readiness`, `/api/competencies`, `/api/sessions/<id>`, `/api/notebook` и health endpoints поверх существующего service facade.
 
 ## Установка
 
@@ -290,7 +290,7 @@ AI feedback в приложении — это учебная подсказка
 
 Для оценки прогресса основной сигнал — structured rubric evaluation: score `1-5` по rubric dimensions, evidence из текста ответа кандидата, gaps и next drills. В TUI этот блок показывается после самооценки перед эталоном и свободным AI feedback; в CLI сохраненную rubric evaluation можно посмотреть через `python -m interview_prep evaluations --answer <id>`. Если feedback помечен как fallback или suspicious, TUI показывает предупреждение, а `/recheck-feedback` запрашивает более строгую перепроверку. После полезного feedback команда `/note-from-answer` сохраняет его gap в `/notebook` для повторения.
 
-`/readiness` открывает focused dashboard по senior competencies: readiness score, количество evidence answers/rubric evaluations, coverage, причины gap и next action по каждой competency.
+`/readiness` открывает focused dashboard по senior competencies: readiness score, количество evidence answers/rubric evaluations, coverage, причины gap, next action и список `Must fix before interview` с конкретными drills по top gaps.
 
 `/questions-review` открывает focused TUI-экран pending generated questions. На нем можно принять полезный вопрос командой `/questions-review accept <id>` или архивировать слабый через `/questions-review archive <id>` без удаления строки из SQLite.
 
@@ -362,3 +362,9 @@ RUN_OLLAMA_TESTS=1 python -m unittest discover -s tests -v
 - `tests` — тесты ключевой логики.
 
 UI зависит от сервисов, сервисы зависят от репозитория и LLM-интерфейса, домен не зависит от инфраструктуры. Это позволяет позже добавить web UI или Textual TUI поверх тех же сервисов.
+
+### Web adapter boundaries
+
+Будущий web UI должен идти через `ReadOnlyApplicationFacade` или новые service-level use cases, а не обращаться к `SQLiteRepository` напрямую из adapter/view кода. Текущий WSGI adapter в `interview_prep/ui/web.py` остается тонким read-only слоем: он валидирует HTTP path/query params, выбирает facade method и сериализует JSON/HTML diagnostics.
+
+Если web UI понадобится write-сценарий, сначала добавляется явный command/service method с тестами, затем adapter вызывает этот метод. Repository остается инфраструктурной зависимостью services/facades, а не частью web contract.

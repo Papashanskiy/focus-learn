@@ -539,6 +539,12 @@ def format_readiness_for_cli(snapshot: ReadinessSnapshot) -> str:
             lines.append(f"  Next action: {gap.next_action}")
     else:
         lines.append("- н/д")
+    lines.append("Must fix before interview:")
+    if overall.top_gaps:
+        for index, gap in enumerate(overall.top_gaps, start=1):
+            lines.append(f"{index}. {gap.must_fix_drill}")
+    else:
+        lines.append("- н/д")
     return "\n".join(lines)
 
 
@@ -870,6 +876,7 @@ def format_session_outcome_for_cli(outcome: SessionOutcome) -> str:
     lines = [
         f"Session outcome #{outcome.id} для session #{outcome.session_id}",
         f"Создано: {outcome.created_at.isoformat(timespec='seconds')}",
+        f"Type: {outcome.outcome_type}",
         f"Readiness delta: {outcome.readiness_delta:+.2f}",
         f"Summary: {outcome.summary}",
         "Strengths:",

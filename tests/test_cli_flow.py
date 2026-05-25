@@ -164,6 +164,7 @@ class CLIFlowTests(unittest.TestCase):
         self.assertIn("Label: Нужна baseline-практика", process.stdout)
         self.assertIn("Top gaps:", process.stdout)
         self.assertIn("Next action:", process.stdout)
+        self.assertIn("Must fix before interview:", process.stdout)
         self.assertIn("не абсолютная оценка кандидата", process.stdout)
 
     def test_stats_command_shows_weekly_readiness_trend_when_enough_session_outcomes(self) -> None:
