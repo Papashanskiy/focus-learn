@@ -23,6 +23,7 @@ from interview_prep.domain.models import (
     PracticeSessionSummary,
     Question,
     QuestionCompetencyLink,
+    QuestionSourceSnapshot,
     QUESTION_SOURCE_QUALITY_STATUSES,
     RubricDimension,
     SESSION_STATUS_ABANDONED,
@@ -75,7 +76,27 @@ def _job(row: sqlite3.Row) -> ContentGenerationJob:
 def _question(row: sqlite3.Row) -> Question:
     values = dict(row)
     values.setdefault("source_quality_status", "accepted")
+    values.setdefault("source_url", None)
+    values.setdefault("source_retrieved_at", None)
+    values.setdefault("source_frequency_hint", None)
+    source_retrieved_at = values["source_retrieved_at"]
+    values["source_retrieved_at"] = _dt(source_retrieved_at) if source_retrieved_at else None
+    source_category_hints_json = values.pop("source_category_hints_json", "[]")
+    values["source_category_hints"] = tuple(_json_string_list(source_category_hints_json or "[]"))
     return Question(**values)
+
+
+def _question_source_snapshot(row: sqlite3.Row) -> QuestionSourceSnapshot:
+    return QuestionSourceSnapshot(
+        id=row["id"],
+        source_id=row["source_id"],
+        url=row["url"],
+        title=row["title"],
+        retrieved_at=_dt(row["retrieved_at"]),
+        checksum=row["checksum"],
+        category_hints=_json_string_list(row["category_hints_json"]),
+        created_at=_dt(row["created_at"]),
+    )
 
 
 def _learning_material(row: sqlite3.Row) -> LearningMaterial:
@@ -990,7 +1011,11 @@ class SQLiteRepository:
                 q.hint,
                 q.reference_answer,
                 q.source,
-                q.source_quality_status
+                q.source_quality_status,
+                q.source_url,
+                q.source_retrieved_at,
+                q.source_category_hints_json,
+                q.source_frequency_hint
             FROM questions q
             {joins}
             {where}
@@ -1003,7 +1028,19 @@ class SQLiteRepository:
     def get_question(self, question_id: int) -> Question | None:
         row = self.connection.execute(
             """
-            SELECT id, topic_id, difficulty, prompt, hint, reference_answer, source, source_quality_status
+            SELECT
+                id,
+                topic_id,
+                difficulty,
+                prompt,
+                hint,
+                reference_answer,
+                source,
+                source_quality_status,
+                source_url,
+                source_retrieved_at,
+                source_category_hints_json,
+                source_frequency_hint
             FROM questions WHERE id = ?
             """,
             (question_id,),
@@ -1061,8 +1098,20 @@ class SQLiteRepository:
             cursor = self.connection.execute(
                 """
                 INSERT INTO questions
-                    (topic_id, difficulty, prompt, hint, reference_answer, source, source_quality_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (
+                        topic_id,
+                        difficulty,
+                        prompt,
+                        hint,
+                        reference_answer,
+                        source,
+                        source_quality_status,
+                        source_url,
+                        source_retrieved_at,
+                        source_category_hints_json,
+                        source_frequency_hint
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     question.topic_id,
@@ -1072,6 +1121,12 @@ class SQLiteRepository:
                     question.reference_answer,
                     question.source,
                     question.source_quality_status,
+                    question.source_url,
+                    question.source_retrieved_at.isoformat(timespec="seconds")
+                    if question.source_retrieved_at
+                    else None,
+                    json.dumps(list(question.source_category_hints), ensure_ascii=False),
+                    question.source_frequency_hint,
                 ),
             )
         return Question(
@@ -1083,12 +1138,28 @@ class SQLiteRepository:
             reference_answer=question.reference_answer,
             source=question.source,
             source_quality_status=question.source_quality_status,
+            source_url=question.source_url,
+            source_retrieved_at=question.source_retrieved_at,
+            source_category_hints=question.source_category_hints,
+            source_frequency_hint=question.source_frequency_hint,
         )
 
     def add_question_once(self, question: Question) -> Question:
         existing = self.connection.execute(
             """
-            SELECT id, topic_id, difficulty, prompt, hint, reference_answer, source, source_quality_status
+            SELECT
+                id,
+                topic_id,
+                difficulty,
+                prompt,
+                hint,
+                reference_answer,
+                source,
+                source_quality_status,
+                source_url,
+                source_retrieved_at,
+                source_category_hints_json,
+                source_frequency_hint
             FROM questions
             WHERE topic_id = ? AND source = ? AND prompt = ?
             """,
@@ -1111,6 +1182,52 @@ class SQLiteRepository:
     def _validate_question_source_quality_status(self, status: str) -> None:
         if status not in QUESTION_SOURCE_QUALITY_STATUSES:
             raise ValueError(f"Unknown question source quality status: {status}")
+
+    def upsert_question_source_snapshot(
+        self,
+        snapshot: QuestionSourceSnapshot,
+    ) -> QuestionSourceSnapshot:
+        category_hints_json = json.dumps(snapshot.category_hints, ensure_ascii=False)
+        retrieved_at = snapshot.retrieved_at.isoformat(timespec="seconds")
+        created_at = snapshot.created_at.isoformat(timespec="seconds")
+        with self.connection:
+            cursor = self.connection.execute(
+                """
+                INSERT INTO question_source_snapshots
+                    (source_id, url, title, retrieved_at, checksum, category_hints_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id, checksum) DO UPDATE SET
+                    url = excluded.url,
+                    title = excluded.title,
+                    retrieved_at = excluded.retrieved_at,
+                    category_hints_json = excluded.category_hints_json
+                RETURNING
+                    id, source_id, url, title, retrieved_at, checksum, category_hints_json, created_at
+                """,
+                (
+                    snapshot.source_id,
+                    snapshot.url,
+                    snapshot.title,
+                    retrieved_at,
+                    snapshot.checksum,
+                    category_hints_json,
+                    created_at,
+                ),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError(f"Question source snapshot was not saved: {snapshot.source_id}")
+        return _question_source_snapshot(row)
+
+    def list_question_source_snapshots(self) -> list[QuestionSourceSnapshot]:
+        rows = self.connection.execute(
+            """
+            SELECT id, source_id, url, title, retrieved_at, checksum, category_hints_json, created_at
+            FROM question_source_snapshots
+            ORDER BY source_id ASC, retrieved_at DESC, id DESC
+            """
+        ).fetchall()
+        return [_question_source_snapshot(row) for row in rows]
 
     def upsert_tag(self, tag: Tag) -> Tag:
         with self.connection:

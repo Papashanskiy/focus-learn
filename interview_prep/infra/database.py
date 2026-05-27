@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 
 DEFAULT_DB_PATH = Path("data/interview_prep.db")
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 19
 
 
 class MigrationStep(NamedTuple):
@@ -45,7 +45,11 @@ CREATE TABLE IF NOT EXISTS questions (
     reference_answer TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'bootstrap',
     source_quality_status TEXT NOT NULL DEFAULT 'accepted'
-        CHECK (source_quality_status IN ('pending_review', 'accepted', 'archived')),
+        CHECK (source_quality_status IN ('pending_review', 'pending_auto_review', 'accepted', 'archived')),
+    source_url TEXT,
+    source_retrieved_at TEXT,
+    source_category_hints_json TEXT NOT NULL DEFAULT '[]',
+    source_frequency_hint TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -443,6 +447,34 @@ CREATE INDEX IF NOT EXISTS idx_session_outcomes_created
     ON session_outcomes(created_at, id);
 """,
     ),
+    MigrationStep(
+        "018_question_source_snapshot_tables",
+        """
+CREATE TABLE IF NOT EXISTS question_source_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    checksum TEXT NOT NULL,
+    category_hints_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_question_source_snapshots_source_checksum
+    ON question_source_snapshots(source_id, checksum);
+
+CREATE INDEX IF NOT EXISTS idx_question_source_snapshots_retrieved
+    ON question_source_snapshots(retrieved_at, id);
+""",
+    ),
+    MigrationStep(
+        "019_question_source_snapshot_source_url_index",
+        """
+CREATE INDEX IF NOT EXISTS idx_question_source_snapshots_source_url
+    ON question_source_snapshots(source_id, url);
+""",
+    ),
 )
 
 SCHEMA = "PRAGMA foreign_keys = ON;\n\n" + "\n\n".join(step.sql.strip() for step in MIGRATION_STEPS)
@@ -469,8 +501,12 @@ def init_db(connection: sqlite3.Connection) -> None:
         connection,
         "questions",
         "source_quality_status",
-        "TEXT NOT NULL DEFAULT 'accepted' CHECK (source_quality_status IN ('pending_review', 'accepted', 'archived'))",
+        "TEXT NOT NULL DEFAULT 'accepted' CHECK (source_quality_status IN ('pending_review', 'pending_auto_review', 'accepted', 'archived'))",
     )
+    _ensure_column(connection, "questions", "source_url", "TEXT")
+    _ensure_column(connection, "questions", "source_retrieved_at", "TEXT")
+    _ensure_column(connection, "questions", "source_category_hints_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(connection, "questions", "source_frequency_hint", "TEXT")
     _ensure_column(connection, "learning_dialog_messages", "dialog_session_id", "TEXT")
     _ensure_column(connection, "learning_dialog_messages", "context_type", "TEXT")
     _ensure_column(connection, "learning_dialog_messages", "context_id", "TEXT")
@@ -496,6 +532,7 @@ def init_db(connection: sqlite3.Connection) -> None:
     )
     _ensure_column(connection, "answer_evaluation_scores", "manual_override_reason", "TEXT")
     _ensure_column(connection, "answer_evaluation_scores", "manual_override_at", "TEXT")
+    _ensure_question_source_quality_status_check(connection)
     _backfill_session_status(connection)
     connection.execute(
         """
@@ -507,6 +544,12 @@ def init_db(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_questions_source_quality_status
         ON questions(source_quality_status, source, topic_id, id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_questions_source_metadata
+        ON questions(source, source_url, source_retrieved_at, id)
         """
     )
     connection.execute(
@@ -541,6 +584,77 @@ def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name:
     existing_columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table_name})")}
     if column_name not in existing_columns:
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+
+def _ensure_question_source_quality_status_check(connection: sqlite3.Connection) -> None:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'questions'"
+    ).fetchone()
+    table_sql = row[0] if row else ""
+    if "pending_auto_review" in table_sql:
+        return
+
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE questions_rebuild (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+                difficulty TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                hint TEXT NOT NULL,
+                reference_answer TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'bootstrap',
+                source_quality_status TEXT NOT NULL DEFAULT 'accepted'
+                    CHECK (source_quality_status IN ('pending_review', 'pending_auto_review', 'accepted', 'archived')),
+                source_url TEXT,
+                source_retrieved_at TEXT,
+                source_category_hints_json TEXT NOT NULL DEFAULT '[]',
+                source_frequency_hint TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            INSERT INTO questions_rebuild
+                (
+                    id,
+                    topic_id,
+                    difficulty,
+                    prompt,
+                    hint,
+                    reference_answer,
+                    source,
+                    source_quality_status,
+                    source_url,
+                    source_retrieved_at,
+                    source_category_hints_json,
+                    source_frequency_hint,
+                    created_at
+                )
+            SELECT
+                id,
+                topic_id,
+                difficulty,
+                prompt,
+                hint,
+                reference_answer,
+                source,
+                source_quality_status,
+                source_url,
+                source_retrieved_at,
+                source_category_hints_json,
+                source_frequency_hint,
+                created_at
+            FROM questions;
+
+            DROP TABLE questions;
+            ALTER TABLE questions_rebuild RENAME TO questions;
+            """
+        )
+        connection.commit()
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
 
 
 def _backfill_session_status(connection: sqlite3.Connection) -> None:

@@ -109,10 +109,26 @@ python -m interview_prep topics
 python -m interview_prep questions
 python -m interview_prep questions --topic 1
 python -m interview_prep questions --tag concurrency
+python -m interview_prep questions-audit
+python -m interview_prep questions-cleanup accepted-generic
+python -m interview_prep questions-source refresh --dry-run
+python -m interview_prep questions-source candidates
+python -m interview_prep questions-source auto-curate --dry-run
+python -m interview_prep questions-source auto-curate
 python -m interview_prep questions-review
 python -m interview_prep questions-review accept 42
 python -m interview_prep questions-review archive 42
 ```
+
+`questions-audit` — read-only диагностика качества базы вопросов. Команда выводит generic, duplicate и too-long prompts с `id`, `topic`, `source`, `source_quality` и текущим `status`, не меняя строки SQLite.
+
+`questions-cleanup accepted-generic` архивирует только accepted generated-вопросы из источников `background-llm`/`llm-seed`, если audit помечает их как generic. Архивные и pending-review вопросы не попадают в practice selection.
+
+`questions-source refresh --dry-run` показывает whitelisted source snapshot metadata (`url`, `retrieved_at`, `title`, checksum, category hints) для будущих source-backed candidates без записи в SQLite и без создания practice-вопросов. Без `--dry-run` команда сохраняет только metadata snapshots в отдельную таблицу; вопросы в practice не добавляются.
+
+`questions-source candidates` преобразует сохраненные source snapshots в собственные source-backed candidate questions со статусом `pending_auto_review`, `source_url`, `source_retrieved_at`, category hints и frequency hint. Эти вопросы не попадают в practice loop, пока auto-curation не переведет high-confidence rows в `accepted`; `--dry-run` показывает candidates без записи.
+
+`questions-source auto-curate --dry-run` классифицирует pending source-backed candidates как `auto_accepted`, `auto_archived` или `quarantined` по deterministic gates и показывает confidence, quality flags, rationale и source evidence без изменения SQLite. Запуск без `--dry-run` применяет deterministic decisions: `auto_accepted` переводит в `accepted`, `auto_archived` переводит в `archived`, а `quarantined` остается `pending_auto_review` вне practice до будущего audit/undo surface. Опционально `--llm-curator` прогоняет quarantined candidates через strict JSON LLM rubric перед применением статусов; невалидный или low-confidence ответ безопасно оставляет вопрос в quarantine.
 
 `questions-review` показывает generated questions со статусом `pending_review`. Команда `accept` переводит вопрос в `accepted`, а `archive` скрывает слабый generated question из будущего practice loop без удаления строки из SQLite.
 

@@ -1,5 +1,56 @@
 # Development Log
 
+## 2026-05-27
+
+### Auto-curation LLM curator rubric
+
+- Закрыт roadmap leaf про LLM curator rubric: `QuestionAutoCurationService` теперь умеет перед применением статусов прогонять quarantined source-backed candidates через strict JSON prompt с решениями `auto_accepted`/`auto_archived`/`quarantined`.
+- Безопасный fallback оставляет candidate в quarantine при недоступной LLM, невалидном JSON, low-confidence acceptance/archive или неполных source metadata; CLI подключает flow явно через `questions-source auto-curate --llm-curator`.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_question_auto_curation_preview_classifies_source_backed_candidates_without_mutation tests.test_services.ServiceTests.test_question_auto_curation_apply_updates_deterministic_statuses_and_leaves_quarantine tests.test_services.ServiceTests.test_question_auto_curation_llm_curator_accepts_ambiguous_candidate_before_apply tests.test_services.ServiceTests.test_question_auto_curation_llm_curator_parse_fallback_keeps_quarantine -v`, `python -m unittest tests.test_cli_flow.CLIFlowTests.test_questions_source_auto_curate_dry_run_classifies_without_status_changes tests.test_cli_flow.CLIFlowTests.test_questions_source_auto_curate_applies_deterministic_status_changes -v`, `python -m compileall interview_prep`.
+
+### Auto-curation deterministic apply
+
+- Закрыт roadmap leaf про apply deterministic decisions: `QuestionAutoCurationService.apply_pending_source_backed_candidates()` применяет `auto_accepted` как `accepted`, `auto_archived` как `archived`, а `quarantined` оставляет в `pending_auto_review`, чтобы такие вопросы не попадали в practice до audit/undo surface.
+- CLI `questions-source auto-curate` теперь применяет deterministic decisions; `--dry-run` остался read-only preview. README обновлен, чтобы больше не описывать non-dry-run как ошибку.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_question_auto_curation_preview_classifies_source_backed_candidates_without_mutation tests.test_services.ServiceTests.test_question_auto_curation_apply_updates_deterministic_statuses_and_leaves_quarantine tests.test_cli_flow.CLIFlowTests.test_questions_source_auto_curate_dry_run_classifies_without_status_changes tests.test_cli_flow.CLIFlowTests.test_questions_source_auto_curate_applies_deterministic_status_changes -v`, `python -m compileall interview_prep`.
+
+### Auto-curation deterministic dry-run
+
+- Первый open roadmap item про auto-curation contract оказался слишком крупным для одной итерации, поэтому он разбит в `## Next` на deterministic dry-run, apply decisions и LLM curator rubric leaves.
+- Закрыт deterministic dry-run leaf: добавлен `QuestionAutoCurationService`, который классифицирует pending `source-backed` candidates как `auto_accepted`, `auto_archived` или `quarantined` по source metadata, generic/duplicate/length gates и не меняет SQLite.
+- CLI `questions-source auto-curate --dry-run [--topic <id>]` показывает decision, confidence, quality flags, rationale и source evidence; без `--dry-run` команда пока явно отказывается менять статусы.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_question_auto_curation_preview_classifies_source_backed_candidates_without_mutation tests.test_cli_flow.CLIFlowTests.test_questions_source_auto_curate_dry_run_classifies_without_status_changes -v`, `python -m compileall interview_prep`.
+
+### Source-backed candidates
+
+- Закрыт roadmap leaf про source-backed candidates: добавлен статус `pending_auto_review`, source metadata columns для questions (`source_url`, `source_retrieved_at`, category hints, frequency hint) и deterministic candidate templates поверх saved source snapshots.
+- CLI `questions-source candidates` создает 16 собственных source-backed candidate questions без копирования external lists; candidates остаются вне practice loop, потому что selection берет только `accepted` questions.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_question_source_refresh_persists_metadata_without_creating_questions tests.test_services.ServiceTests.test_question_source_candidates_create_pending_auto_review_questions_with_metadata -v`, `python -m unittest tests.test_cli_flow.CLIFlowTests.test_questions_source_refresh_dry_run_lists_whitelist_without_creating_rows tests.test_cli_flow.CLIFlowTests.test_questions_source_candidates_saves_pending_auto_review_questions -v`, `python -m unittest tests.test_services.ServiceTests.test_init_db_creates_schema_version_table_with_current_version tests.test_services.ServiceTests.test_init_db_runs_explicit_idempotent_migration_steps tests.test_services.ServiceTests.test_init_db_upgrades_legacy_practice_database_to_current_schema tests.test_services.ServiceTests.test_repository_tracks_question_source_quality_status tests.test_services.ServiceTests.test_practice_selection_skips_archived_questions -v`, `python -m compileall interview_prep`, `python -m interview_prep --db /tmp/interview_prep_source_candidates_check.db questions-source refresh`, `python -m interview_prep --db /tmp/interview_prep_source_candidates_check.db questions-source candidates`.
+
+### Source refresh foundation
+
+- Закрыт roadmap leaf про source refresh foundation: добавлен metadata-only CLI `questions-source refresh --dry-run`, который показывает whitelisted source snapshots с `url`, `retrieved_at`, `title`, checksum и category hints без записи в SQLite.
+- Non-dry-run `questions-source refresh` сохраняет только rows в `question_source_snapshots` через repository/service слой; questions/practice candidates не создаются, чтобы следующий source-backed candidates шаг остался отдельным.
+- Проверки: `python -m unittest tests.test_cli_flow.CLIFlowTests.test_content_generation_commands_are_registered tests.test_cli_flow.CLIFlowTests.test_questions_source_refresh_dry_run_lists_whitelist_without_creating_rows tests.test_services.ServiceTests.test_init_db_runs_explicit_idempotent_migration_steps tests.test_services.ServiceTests.test_question_source_refresh_persists_metadata_without_creating_questions -v`, `python -m unittest tests.test_services.ServiceTests.test_init_db_creates_schema_version_table_with_current_version tests.test_services.ServiceTests.test_init_db_upgrades_legacy_practice_database_to_current_schema -v`, `python -m compileall interview_prep`, `python -m interview_prep --db /tmp/interview_prep_source_refresh_check.db questions-source refresh --dry-run`.
+
+### Question source research note
+
+- Закрыт roadmap leaf про source research: добавлена `QUESTION_SOURCE_RESEARCH.md` с source inventory для Python core/async, coding screens, API/security, Postgres, system design, testing и ops/reliability.
+- Список будущих candidate themes написан своими словами и зафиксирован как research input для `questions-source refresh`, source-backed candidates и `canonical-2026`; внешние списки вопросов не копировались.
+- Проверки: `python -m compileall interview_prep`, `rg -n "Question source research|QUESTION_SOURCE_RESEARCH|\\[ \\] Question source research" ROADMAP.md DEVELOPMENT_LOG.md QUESTION_SOURCE_RESEARCH.md`.
+
+### Content quality cleanup
+
+- Закрыт roadmap leaf про cleanup accepted generic generated questions: добавлен явный CLI `questions-cleanup accepted-generic`, который архивирует только accepted generic generated questions из `background-llm`/`llm-seed` без удаления строк SQLite.
+- Practice selection теперь берет только `accepted` questions, поэтому `archived` и `pending_review` rows не попадают в обычный practice loop.
+- Проверки: `python -m unittest tests.test_cli_flow.CLIFlowTests.test_content_generation_commands_are_registered tests.test_cli_flow.CLIFlowTests.test_questions_audit_lists_generic_duplicate_and_too_long_questions tests.test_cli_flow.CLIFlowTests.test_questions_cleanup_archives_accepted_generic_generated_questions tests.test_services.ServiceTests.test_practice_selection_skips_archived_questions -v`, `python -m unittest tests.test_services.ServiceTests.test_mixed_session_next_question_prioritizes_weak_topic tests.test_services.ServiceTests.test_topic_session_repeats_weak_question_after_interval -v`, `python -m compileall interview_prep`.
+
+### Content quality audit CLI
+
+- Закрыт roadmap leaf про repeatable audit вопросов: добавлен read-only CLI `questions-audit`, который находит generic prompts по известным шаблонным формулировкам, same-topic duplicate prompts через существующую similarity logic и too-long prompts по настраиваемому `--max-prompt-chars`.
+- Вывод audit включает `id`, `topic`, `source`, `source_quality`, `status`, finding kind, detail и prompt; команда не меняет SQLite и оставляет cleanup/curation отдельным следующим шагом.
+- Проверки: `python -m unittest tests.test_cli_flow.CLIFlowTests.test_content_generation_commands_are_registered tests.test_cli_flow.CLIFlowTests.test_questions_audit_lists_generic_duplicate_and_too_long_questions -v`, `python -m compileall interview_prep`.
+
 ## 2026-05-26
 
 ### Calibration manual override readiness regression

@@ -22,6 +22,7 @@ from interview_prep.domain.models import (
     QuestionCompetencyLink,
     QUESTION_SOURCE_QUALITY_ACCEPTED,
     QUESTION_SOURCE_QUALITY_ARCHIVED,
+    QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
     QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
     RubricDimension,
     SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE,
@@ -56,7 +57,22 @@ from interview_prep.services.content_generation_service import (
 from interview_prep.services.curriculum_service import CurriculumService, parse_curriculum
 from interview_prep.services.evaluation_service import EvaluationService, build_rubric_evaluation_prompt
 from interview_prep.services.learning_service import LearningService, build_learning_prompt
+from interview_prep.services.question_auto_curation_service import (
+    AUTO_CURATION_DECISION_AUTO_ACCEPTED,
+    AUTO_CURATION_DECISION_AUTO_ARCHIVED,
+    AUTO_CURATION_DECISION_QUARANTINED,
+    AUTO_CURATION_FLAG_GENERIC,
+    AUTO_CURATION_FLAG_INCOMPLETE_SOURCE_METADATA,
+    AUTO_CURATION_FLAG_LLM_CURATOR,
+    AUTO_CURATION_FLAG_LLM_PARSE_FALLBACK,
+    QuestionAutoCurationService,
+)
 from interview_prep.services.question_service import QuestionService
+from interview_prep.services.question_source_service import (
+    QuestionSourceService,
+    SOURCE_BACKED_CANDIDATE_TEMPLATES,
+    WHITELISTED_QUESTION_SOURCES,
+)
 from interview_prep.services.read_facade import ReadOnlyApplicationFacade
 from interview_prep.services.readiness_service import ReadinessService
 from interview_prep.services.session_service import (
@@ -283,6 +299,7 @@ class ServiceTests(unittest.TestCase):
             "system_design_rubric_dimensions",
             "system_design_evaluations",
             "system_design_evaluation_scores",
+            "question_source_snapshots",
         }
         self.assertTrue(expected_tables.issubset(tables))
 
@@ -375,6 +392,7 @@ class ServiceTests(unittest.TestCase):
                 "system_design_rubric_dimensions",
                 "system_design_evaluations",
                 "system_design_evaluation_scores",
+                "question_source_snapshots",
             }.issubset(tables)
         )
         version = connection.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()
@@ -912,6 +930,396 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([question.id for question in pending], [saved.id])
         self.assertEqual(archived.source_quality_status, QUESTION_SOURCE_QUALITY_ARCHIVED)
         self.assertEqual(repository.get_question(saved.id or 0).source_quality_status, QUESTION_SOURCE_QUALITY_ARCHIVED)
+
+    def test_practice_selection_skips_archived_questions(self) -> None:
+        repository = make_repository()
+        topic = repository.find_topic_by_slug("async-backend")
+        self.assertIsNotNone(topic)
+        assert topic is not None
+
+        archived = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="middle",
+                prompt="Archived generated question should not appear in practice.",
+                hint="Archived rows stay in SQLite but are not practice candidates.",
+                reference_answer="Practice selection only uses accepted questions.",
+                source="background-llm",
+                source_quality_status=QUESTION_SOURCE_QUALITY_ARCHIVED,
+            )
+        )
+        pending = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="middle",
+                prompt="Pending generated question should not appear in practice.",
+                hint="Pending rows need review before practice.",
+                reference_answer="Practice selection only uses accepted questions.",
+                source="llm-seed",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+            )
+        )
+        accepted = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt="Accepted generated question should remain a practice candidate.",
+                hint="Accepted rows are eligible for practice.",
+                reference_answer="Accepted questions remain selectable.",
+                source="background-llm",
+                source_quality_status=QUESTION_SOURCE_QUALITY_ACCEPTED,
+            )
+        )
+
+        sessions = SessionService(repository, StaticLLM())
+        session = sessions.start_session(topic_id=topic.id)
+        candidate_ids = [question.id for question in sessions.candidate_questions(session.id or 0)]
+
+        self.assertIn(accepted.id, candidate_ids)
+        self.assertNotIn(archived.id, candidate_ids)
+        self.assertNotIn(pending.id, candidate_ids)
+        self.assertTrue(
+            all(
+                question.source_quality_status == QUESTION_SOURCE_QUALITY_ACCEPTED
+                for question in sessions.candidate_questions(session.id or 0)
+            )
+        )
+
+    def test_question_source_refresh_persists_metadata_without_creating_questions(self) -> None:
+        repository = make_repository()
+        before_question_count = len(repository.list_questions())
+        service = QuestionSourceService(repository)
+
+        result = service.refresh(now=datetime(2026, 5, 27, 9, 0, 0))
+        repeat_result = service.refresh(now=datetime(2026, 5, 28, 9, 0, 0))
+        snapshots = repository.list_question_source_snapshots()
+
+        self.assertFalse(result.dry_run)
+        self.assertEqual(result.saved_count, len(WHITELISTED_QUESTION_SOURCES))
+        self.assertEqual(repeat_result.saved_count, len(WHITELISTED_QUESTION_SOURCES))
+        self.assertEqual(len(snapshots), len(WHITELISTED_QUESTION_SOURCES))
+        self.assertEqual(len(repository.list_questions()), before_question_count)
+        self.assertEqual(snapshots[0].source_id, "S01")
+        self.assertEqual(snapshots[0].title, "Python data model")
+        self.assertEqual(snapshots[0].retrieved_at, datetime(2026, 5, 28, 9, 0, 0))
+        self.assertIn("python-core", snapshots[0].category_hints)
+        self.assertEqual(len(snapshots[0].checksum), 64)
+
+    def test_question_source_candidates_create_pending_auto_review_questions_with_metadata(self) -> None:
+        repository = make_repository()
+        service = QuestionSourceService(repository)
+        service.refresh(now=datetime(2026, 5, 27, 9, 0, 0))
+
+        result = service.create_source_backed_candidates()
+        repeat_result = service.create_source_backed_candidates()
+        candidates = repository.list_questions(source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW)
+        sessions = SessionService(repository, StaticLLM())
+        session = sessions.start_session(topic_id=None)
+        practice_question_ids = {question.id for question in sessions.candidate_questions(session.id or 0)}
+
+        self.assertEqual(result.created_count, len(SOURCE_BACKED_CANDIDATE_TEMPLATES))
+        self.assertEqual(result.skipped_count, 0)
+        self.assertEqual(repeat_result.created_count, 0)
+        self.assertEqual(repeat_result.skipped_count, len(SOURCE_BACKED_CANDIDATE_TEMPLATES))
+        self.assertEqual(len(candidates), len(SOURCE_BACKED_CANDIDATE_TEMPLATES))
+        first = next(
+            question
+            for question in candidates
+            if question.source_url == "https://docs.python.org/3/reference/datamodel.html"
+        )
+        self.assertEqual(first.source, "source-backed")
+        self.assertEqual(first.source_quality_status, QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW)
+        self.assertEqual(first.source_url, "https://docs.python.org/3/reference/datamodel.html")
+        self.assertEqual(first.source_retrieved_at, datetime(2026, 5, 27, 9, 0, 0))
+        self.assertIn("python-core", first.source_category_hints)
+        self.assertEqual(first.source_frequency_hint, "official-docs:common-python-core")
+        self.assertNotIn(first.id, practice_question_ids)
+
+    def test_question_auto_curation_preview_classifies_source_backed_candidates_without_mutation(self) -> None:
+        repository = make_repository()
+        topic = repository.find_topic_by_slug("async-backend")
+        self.assertIsNotNone(topic)
+        assert topic is not None
+        retrieved_at = datetime(2026, 5, 27, 9, 0, 0)
+        accepted_duplicate_base = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt="Как защитить webhook worker от двойной обработки, если retry приходит после timeout?",
+                hint="Accepted base для duplicate gate.",
+                reference_answer="Нужны idempotency key, bounded retry и observability.",
+                source="canonical-2026",
+                source_quality_status=QUESTION_SOURCE_QUALITY_ACCEPTED,
+            )
+        )
+        good = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt=(
+                    "Async worker получает burst webhooks и downstream API отвечает timeout. "
+                    "Как ты задашь bounded concurrency, idempotency и queue lag alerts?"
+                ),
+                hint="High-confidence source-backed candidate.",
+                reference_answer="Нужны bounded queue, idempotency key, retry budget и lag metrics.",
+                source="source-backed",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                source_url="https://docs.python.org/3/library/asyncio.html",
+                source_retrieved_at=retrieved_at,
+                source_category_hints=("async", "queues"),
+                source_frequency_hint="official-docs:common-async-production",
+            )
+        )
+        generic = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt="Разбери ключевой production-риск в backend-flow и какие tradeoffs важны?",
+                hint="Generic candidate.",
+                reference_answer="Should be auto-archived by dry-run decision only.",
+                source="source-backed",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                source_url="https://example.test/source",
+                source_retrieved_at=retrieved_at,
+                source_category_hints=("async",),
+                source_frequency_hint="interview-coverage:generic",
+            )
+        )
+        missing_metadata = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt=(
+                    "Async payment worker retries timeout responses. "
+                    "Как ты защитишь idempotency, DLQ и user-visible consistency?"
+                ),
+                hint="Missing source evidence should quarantine.",
+                reference_answer="Needs source evidence before automatic acceptance.",
+                source="source-backed",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+            )
+        )
+        duplicate = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt=accepted_duplicate_base.prompt,
+                hint="Duplicate candidate.",
+                reference_answer="Should be auto-archived by dry-run decision only.",
+                source="source-backed",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                source_url="https://example.test/source",
+                source_retrieved_at=retrieved_at,
+                source_category_hints=("async",),
+                source_frequency_hint="interview-coverage:duplicate",
+            )
+        )
+        service = QuestionAutoCurationService(repository)
+
+        result = service.preview_pending_source_backed_candidates(topic_id=topic.id)
+        decisions_by_id = {decision.question.id: decision for decision in result.decisions}
+
+        self.assertTrue(result.dry_run)
+        self.assertEqual(decisions_by_id[good.id].decision, AUTO_CURATION_DECISION_AUTO_ACCEPTED)
+        self.assertEqual(decisions_by_id[generic.id].decision, AUTO_CURATION_DECISION_AUTO_ARCHIVED)
+        self.assertIn(AUTO_CURATION_FLAG_GENERIC, decisions_by_id[generic.id].quality_flags)
+        self.assertEqual(decisions_by_id[missing_metadata.id].decision, AUTO_CURATION_DECISION_QUARANTINED)
+        self.assertIn(
+            AUTO_CURATION_FLAG_INCOMPLETE_SOURCE_METADATA,
+            decisions_by_id[missing_metadata.id].quality_flags,
+        )
+        self.assertEqual(decisions_by_id[duplicate.id].decision, AUTO_CURATION_DECISION_AUTO_ARCHIVED)
+        self.assertEqual(decisions_by_id[duplicate.id].duplicate_of_id, accepted_duplicate_base.id)
+        self.assertEqual(
+            repository.get_question(good.id or 0).source_quality_status,
+            QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+        )
+        self.assertEqual(
+            repository.get_question(generic.id or 0).source_quality_status,
+            QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+        )
+
+    def test_question_auto_curation_apply_updates_deterministic_statuses_and_leaves_quarantine(self) -> None:
+        repository = make_repository()
+        topic = repository.find_topic_by_slug("async-backend")
+        self.assertIsNotNone(topic)
+        assert topic is not None
+        retrieved_at = datetime(2026, 5, 27, 9, 0, 0)
+        good = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt=(
+                    "Async webhook worker получает burst событий и downstream API отвечает timeout. "
+                    "Как ты задашь bounded concurrency, idempotency и queue lag alerts?"
+                ),
+                hint="High-confidence source-backed candidate.",
+                reference_answer="Нужны bounded queue, idempotency key, retry budget и lag metrics.",
+                source="source-backed",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                source_url="https://docs.python.org/3/library/asyncio.html",
+                source_retrieved_at=retrieved_at,
+                source_category_hints=("async", "queues"),
+                source_frequency_hint="official-docs:common-async-production",
+            )
+        )
+        generic = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt="Разбери ключевой production-риск в backend-flow и какие tradeoffs важны?",
+                hint="Generic candidate.",
+                reference_answer="Should be auto-archived by deterministic apply.",
+                source="source-backed",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                source_url="https://example.test/source",
+                source_retrieved_at=retrieved_at,
+                source_category_hints=("async",),
+                source_frequency_hint="interview-coverage:generic",
+            )
+        )
+        missing_metadata = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt=(
+                    "Async payment worker retries timeout responses. "
+                    "Как ты защитишь idempotency, DLQ и user-visible consistency?"
+                ),
+                hint="Missing source evidence should quarantine.",
+                reference_answer="Needs source evidence before automatic acceptance.",
+                source="source-backed",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+            )
+        )
+        service = QuestionAutoCurationService(repository)
+
+        result = service.apply_pending_source_backed_candidates(topic_id=topic.id)
+
+        self.assertFalse(result.dry_run)
+        self.assertEqual(result.applied_count, 2)
+        self.assertEqual(result.accepted_count, 1)
+        self.assertEqual(result.archived_count, 1)
+        self.assertEqual(result.quarantined_count, 1)
+        self.assertEqual(
+            repository.get_question(good.id or 0).source_quality_status,
+            QUESTION_SOURCE_QUALITY_ACCEPTED,
+        )
+        self.assertEqual(
+            repository.get_question(generic.id or 0).source_quality_status,
+            QUESTION_SOURCE_QUALITY_ARCHIVED,
+        )
+        self.assertEqual(
+            repository.get_question(missing_metadata.id or 0).source_quality_status,
+            QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+        )
+
+    def test_question_auto_curation_llm_curator_accepts_ambiguous_candidate_before_apply(self) -> None:
+        class AcceptingCuratorLLM(FallbackLLMClient):
+            def generate(self, prompt: str) -> str:
+                self.last_prompt = prompt
+                return json.dumps(
+                    {
+                        "decision": "auto_accepted",
+                        "confidence": 0.91,
+                        "score": 4,
+                        "rationale": "Concrete worker retry and idempotency signal is interview-useful.",
+                        "source_evidence": "asyncio docs snapshot and common-async-production frequency hint",
+                        "quality_flags": ["specific_scenario"],
+                    }
+                )
+
+        repository = make_repository()
+        topic = repository.find_topic_by_slug("async-backend")
+        self.assertIsNotNone(topic)
+        assert topic is not None
+        retrieved_at = datetime(2026, 5, 27, 9, 0, 0)
+        ambiguous = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt="Как защитить asyncio worker retries и idempotency?",
+                hint="Short prompt needs curator review before automatic acceptance.",
+                reference_answer="Нужны idempotency key, bounded retries, DLQ и queue lag alerts.",
+                source="source-backed",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                source_url="https://docs.python.org/3/library/asyncio-queue.html",
+                source_retrieved_at=retrieved_at,
+                source_category_hints=("async", "queues"),
+                source_frequency_hint="official-docs:common-async-production",
+            )
+        )
+        llm = AcceptingCuratorLLM()
+        service = QuestionAutoCurationService(repository, llm)
+
+        deterministic = service.preview_pending_source_backed_candidates(topic_id=topic.id)
+        deterministic_by_id = {decision.question.id: decision for decision in deterministic.decisions}
+        result = service.apply_pending_source_backed_candidates(topic_id=topic.id, use_llm_curator=True)
+        decisions_by_id = {decision.question.id: decision for decision in result.decisions}
+
+        self.assertEqual(deterministic_by_id[ambiguous.id].decision, AUTO_CURATION_DECISION_QUARANTINED)
+        self.assertIn("<source_backed_question_curator_json>", llm.last_prompt)
+        self.assertFalse(result.dry_run)
+        self.assertEqual(result.accepted_count, 1)
+        self.assertEqual(decisions_by_id[ambiguous.id].decision, AUTO_CURATION_DECISION_AUTO_ACCEPTED)
+        self.assertEqual(decisions_by_id[ambiguous.id].curator_score, 4)
+        self.assertIn(AUTO_CURATION_FLAG_LLM_CURATOR, decisions_by_id[ambiguous.id].quality_flags)
+        self.assertEqual(
+            repository.get_question(ambiguous.id or 0).source_quality_status,
+            QUESTION_SOURCE_QUALITY_ACCEPTED,
+        )
+
+    def test_question_auto_curation_llm_curator_parse_fallback_keeps_quarantine(self) -> None:
+        class InvalidCuratorLLM(FallbackLLMClient):
+            def generate(self, prompt: str) -> str:
+                return "not json"
+
+        repository = make_repository()
+        topic = repository.find_topic_by_slug("async-backend")
+        self.assertIsNotNone(topic)
+        assert topic is not None
+        retrieved_at = datetime(2026, 5, 27, 9, 0, 0)
+        ambiguous = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt="Как проверить queue retry budget в asyncio worker?",
+                hint="Short prompt needs safe fallback when curator output is invalid.",
+                reference_answer="Нужны retry budget, idempotency, DLQ и observability.",
+                source="source-backed",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                source_url="https://docs.python.org/3/library/asyncio-queue.html",
+                source_retrieved_at=retrieved_at,
+                source_category_hints=("async", "queues"),
+                source_frequency_hint="official-docs:common-async-production",
+            )
+        )
+        service = QuestionAutoCurationService(repository, InvalidCuratorLLM())
+
+        result = service.apply_pending_source_backed_candidates(topic_id=topic.id, use_llm_curator=True)
+        decisions_by_id = {decision.question.id: decision for decision in result.decisions}
+
+        self.assertEqual(result.accepted_count, 0)
+        self.assertEqual(result.quarantined_count, 1)
+        self.assertEqual(decisions_by_id[ambiguous.id].decision, AUTO_CURATION_DECISION_QUARANTINED)
+        self.assertIn(AUTO_CURATION_FLAG_LLM_PARSE_FALLBACK, decisions_by_id[ambiguous.id].quality_flags)
+        self.assertEqual(
+            repository.get_question(ambiguous.id or 0).source_quality_status,
+            QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+        )
 
     def test_seed_defaults_adds_idempotent_senior_competencies(self) -> None:
         connection = sqlite3.connect(":memory:")

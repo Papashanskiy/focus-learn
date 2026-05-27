@@ -10,7 +10,10 @@ from interview_prep.services.calibration_service import CalibrationService
 from interview_prep.services.curriculum_service import CurriculumService
 from interview_prep.services.evaluation_service import EvaluationService
 from interview_prep.services.interview_report_service import InterviewReportService
+from interview_prep.services.question_auto_curation_service import QuestionAutoCurationService
+from interview_prep.services.question_quality_audit_service import QuestionQualityAuditService
 from interview_prep.services.question_service import QuestionService
+from interview_prep.services.question_source_service import QuestionSourceService
 from interview_prep.services.readiness_service import ReadinessService
 from interview_prep.services.learning_service import LearningService
 from interview_prep.services.read_facade import ReadOnlyApplicationFacade
@@ -42,6 +45,9 @@ class AppServices:
         self.calibration = CalibrationService(self.repository)
         self.curriculum = CurriculumService(self.repository, self.llm)
         self.questions = QuestionService(self.repository, self.llm)
+        self.question_auto_curation = QuestionAutoCurationService(self.repository, self.llm)
+        self.question_quality_audit = QuestionQualityAuditService(self.repository)
+        self.question_sources = QuestionSourceService(self.repository)
         self.evaluations = EvaluationService(self.repository, self.llm)
         self.learning = LearningService(self.repository, self.llm)
         self.system_design = SystemDesignService(self.repository, self.llm)

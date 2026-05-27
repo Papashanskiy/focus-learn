@@ -21,10 +21,12 @@ SESSION_OUTCOME_TYPES = (
 )
 
 QUESTION_SOURCE_QUALITY_PENDING_REVIEW = "pending_review"
+QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW = "pending_auto_review"
 QUESTION_SOURCE_QUALITY_ACCEPTED = "accepted"
 QUESTION_SOURCE_QUALITY_ARCHIVED = "archived"
 QUESTION_SOURCE_QUALITY_STATUSES = (
     QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+    QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
     QUESTION_SOURCE_QUALITY_ACCEPTED,
     QUESTION_SOURCE_QUALITY_ARCHIVED,
 )
@@ -82,6 +84,10 @@ class Question:
     reference_answer: str
     source: str = "bootstrap"
     source_quality_status: str = QUESTION_SOURCE_QUALITY_ACCEPTED
+    source_url: str | None = None
+    source_retrieved_at: datetime | None = None
+    source_category_hints: tuple[str, ...] = ()
+    source_frequency_hint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -225,6 +231,18 @@ class ContentGenerationJob:
     error: str | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True)
+class QuestionSourceSnapshot:
+    id: int | None
+    source_id: str
+    url: str
+    title: str
+    retrieved_at: datetime
+    checksum: str
+    category_hints: list[str]
+    created_at: datetime
 
 
 @dataclass(frozen=True)

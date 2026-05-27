@@ -56,6 +56,17 @@ class LLMUnavailable(RuntimeError):
 class FallbackLLMClient(LLMClient):
     def generate(self, prompt: str) -> str:
         lowered = prompt.lower()
+        if "source_backed_question_curator_json" in lowered:
+            return json.dumps(
+                {
+                    "decision": "quarantined",
+                    "confidence": 0.55,
+                    "score": 2,
+                    "rationale": "Fallback curator cannot verify ambiguous source-backed evidence.",
+                    "source_evidence": "fallback-client-no-live-model",
+                    "quality_flags": ["fallback_quarantine"],
+                }
+            )
         if "learning curriculum starter pack" in lowered:
             return json.dumps(
                 {

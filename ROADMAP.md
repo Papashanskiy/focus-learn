@@ -36,6 +36,7 @@
 - CLI `interview-report` экспортирует Markdown-отчет перед интервью по latest или выбранной completed practice session: readiness signal, strengths/gaps, evidence answers и next plan.
 - CLI `curriculum-status` показывает read-only покрытие generated curriculum: counts curriculum topics/subtopics/objectives/questions и пустые зоны bootstrap/fallback.
 - Generated content уже появляется в приложении; для generated questions добавлен первый quality gate против очевидных дублей внутри темы, storage foundation source_quality/status (`pending_review`/`accepted`/`archived`), CLI `questions-review` и TUI `/questions-review` для pending review/accept/archive. Background question generation уже просит LLM вернуть tag/competency slugs и безопасно привязывает tags/known competencies к новым вопросам; generated materials/scenarios можно архивировать с optional reason; еще нет оценки полезности generated artifacts.
+- Source refresh pipeline уже может превращать whitelisted source snapshots в собственные `source-backed` candidate questions со статусом `pending_auto_review`, source URL/retrieved metadata, category hints и frequency hint; deterministic auto-curation может принять high-confidence candidates в practice или архивировать generic/duplicate, а quarantine остается вне practice до audit/undo surface.
 - TUI refactor уже выделил pure render helpers, practice/learning/system-design controllers и content worker orchestration; дальнейшие TUI-фичи должны сохранять этот контракт и не возвращать state transitions обратно в монолитный `ui/tui.py`.
 
 ## Product principles
@@ -60,6 +61,14 @@
 
 ## Done
 
+- [x] Auto-curation LLM curator rubric: `questions-source auto-curate --llm-curator` can run strict JSON LLM review for quarantined source-backed candidates before applying status changes, with safe quarantine fallback on invalid/low-confidence output.
+- [x] Auto-curation deterministic apply: CLI `questions-source auto-curate` применяет deterministic `auto_accepted`/`auto_archived` statuses и оставляет quarantine вне practice.
+- [x] Auto-curation deterministic dry-run: CLI `questions-source auto-curate --dry-run` классифицирует pending source-backed candidates в `auto_accepted`/`auto_archived`/`quarantined` без изменения SQLite.
+- [x] Source-backed candidates: CLI `questions-source candidates` создает собственные pending_auto_review questions из saved source snapshots с source metadata/frequency hints без попадания в practice.
+- [x] Source refresh foundation: CLI `questions-source refresh --dry-run` shows whitelisted source snapshot metadata and non-dry-run saves metadata snapshots without creating practice questions.
+- [x] Question source research: добавлена `QUESTION_SOURCE_RESEARCH.md` с external source inventory и paraphrased interview coverage map без копирования чужих списков.
+- [x] Content quality cleanup: CLI `questions-cleanup accepted-generic` archives accepted generic generated questions and practice selection only uses accepted questions.
+- [x] Content quality audit: CLI `questions-audit` выводит generic/duplicate/too-long questions с id/topic/source/source_quality/status без изменения SQLite.
 - [x] Calibration: regression-тест подтверждает, что manual override влияет на readiness и сохраняет original AI score для аудита.
 - [x] Calibration: manual override rubric score учитывается как effective score в readiness/session outcome/report surfaces.
 - [x] Calibration: CLI `interview-report` экспортирует Markdown-отчет со strengths, gaps, evidence answers и next plan.
@@ -304,12 +313,15 @@
 
 ### 0A. Review follow-up: question quality and interview coverage
 
-- [ ] Content quality audit: добавить CLI/script для повторяемого аудита вопросов в SQLite и вывода generic/duplicate/too-long questions с `id`, `source`, `source_quality`, `status`, `topic`.
-- [ ] Content quality cleanup: перевести найденные accepted generic generated questions в `archived` или `pending_review` и покрыть тестом, что archived questions не попадают в practice selection.
-- [ ] Question source research: завести markdown-заметку с использованными external sources и синтезированным списком популярных interview questions/categories; формулировки писать своими словами, без дословного копирования списков из интернета.
-- [ ] Source refresh foundation: добавить `questions-source refresh --dry-run`, который по whitelist источников сохраняет source snapshot metadata (`url`, `retrieved_at`, `title`, checksum, category hints) без автоматического попадания в practice.
-- [ ] Source-backed candidates: преобразовывать source research/snapshots в собственные candidate questions с `source_url`, `source_retrieved_at`, category/frequency hints и статусом `pending_auto_review`, без дословного копирования external lists.
-- [ ] Auto-curation contract: добавить deterministic gates + LLM curator rubric, который автоматически принимает high-confidence source-backed questions, архивирует obvious generic/duplicate candidates и отправляет ambiguous cases в quarantine.
+- [x] Content quality audit: добавить CLI/script для повторяемого аудита вопросов в SQLite и вывода generic/duplicate/too-long questions с `id`, `source`, `source_quality`, `status`, `topic`.
+- [x] Content quality cleanup: перевести найденные accepted generic generated questions в `archived` или `pending_review` и покрыть тестом, что archived questions не попадают в practice selection.
+- [x] Question source research: завести markdown-заметку с использованными external sources и синтезированным списком популярных interview questions/categories; формулировки писать своими словами, без дословного копирования списков из интернета.
+- [x] Source refresh foundation: добавить `questions-source refresh --dry-run`, который по whitelist источников сохраняет source snapshot metadata (`url`, `retrieved_at`, `title`, checksum, category hints) без автоматического попадания в practice.
+- [x] Source-backed candidates: преобразовывать source research/snapshots в собственные candidate questions с `source_url`, `source_retrieved_at`, category/frequency hints и статусом `pending_auto_review`, без дословного копирования external lists.
+- [x] Auto-curation contract: добавить deterministic gates + LLM curator rubric, который автоматически принимает high-confidence source-backed questions, архивирует obvious generic/duplicate candidates и отправляет ambiguous cases в quarantine.
+  - [x] Deterministic dry-run: классифицировать pending source-backed candidates в `auto_accepted`/`auto_archived`/`quarantined` без изменения SQLite.
+  - [x] Apply deterministic decisions: обновлять statuses для `auto_accepted`/`auto_archived`, оставляя `quarantined` вне practice до audit/undo surface.
+  - [x] LLM curator rubric: добавить strict prompt/parse fallback для ambiguous quarantine cases перед автоматическим изменением статусов.
 - [ ] Auto-curation audit: сохранять curator score, rationale, model/version, source evidence и decision (`auto_accepted`, `auto_archived`, `quarantined`), чтобы пользователь мог посмотреть и откатить решение, но не обязан approve вручную.
 - [ ] Canonical questions: на основе source research добавить non-LLM seed pack `canonical-2026` с первой партией из 40 must-know вопросов для Python core, coding screen, API/web, SQL/Postgres, async/queues, system design, testing и ops.
 - [ ] Canonical metadata: хранить для seeded questions frequency/type/competency metadata через существующие tags/competencies; добавлять новую схему только если tags не покрывают `must_know`, `coding`, `api`, `db`, `system_design`.

@@ -9,6 +9,7 @@ from interview_prep.domain.models import (
     AnswerEvaluation,
     Question,
     QuestionCompetencyLink,
+    QuestionSourceSnapshot,
     SESSION_STATUS_COMPLETED,
     SessionOutcome,
     SystemDesignArtifact,
@@ -28,6 +29,11 @@ from interview_prep.services.content_generation_service import (
 )
 from interview_prep.services.app_factory import AppServices
 from interview_prep.services.curriculum_service import CurriculumStatus
+from interview_prep.services.question_quality_audit_service import (
+    DEFAULT_MAX_QUESTION_PROMPT_CHARS,
+    QuestionQualityFinding,
+)
+from interview_prep.services.question_auto_curation_service import QuestionAutoCurationDecision
 from interview_prep.services.readiness_service import ReadinessSnapshot
 
 
@@ -81,6 +87,58 @@ def build_parser() -> argparse.ArgumentParser:
     )
     questions_review_parser.add_argument("question_id", nargs="?", type=int, help="ID question для accept/archive")
     questions_review_parser.set_defaults(handler=cmd_questions_review)
+
+    questions_audit_parser = subparsers.add_parser(
+        "questions-audit",
+        parents=[shared_parent],
+        help="Read-only audit of generic, duplicate and too-long questions",
+    )
+    questions_audit_parser.add_argument("--topic", type=int, help="ID темы для аудита")
+    questions_audit_parser.add_argument(
+        "--max-prompt-chars",
+        type=int,
+        default=DEFAULT_MAX_QUESTION_PROMPT_CHARS,
+        help="Порог длины prompt для too-long finding",
+    )
+    questions_audit_parser.set_defaults(handler=cmd_questions_audit)
+
+    questions_cleanup_parser = subparsers.add_parser(
+        "questions-cleanup",
+        parents=[shared_parent],
+        help="Archive accepted generic generated questions found by quality audit",
+    )
+    questions_cleanup_parser.add_argument(
+        "target",
+        nargs="?",
+        default="accepted-generic",
+        choices=["accepted-generic"],
+        help="Cleanup target: accepted-generic archives accepted generated questions with generic wording",
+    )
+    questions_cleanup_parser.add_argument("--topic", type=int, help="ID темы для cleanup")
+    questions_cleanup_parser.set_defaults(handler=cmd_questions_cleanup)
+
+    questions_source_parser = subparsers.add_parser(
+        "questions-source",
+        parents=[shared_parent],
+        help="Refresh whitelisted source metadata and prepare source-backed candidates",
+    )
+    questions_source_parser.add_argument(
+        "action",
+        choices=["refresh", "candidates", "auto-curate"],
+        help="Source metadata action",
+    )
+    questions_source_parser.add_argument("--topic", type=int, help="ID темы для auto-curation preview")
+    questions_source_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Показать результат без записи в SQLite",
+    )
+    questions_source_parser.add_argument(
+        "--llm-curator",
+        action="store_true",
+        help="Перед применением статусов прогнать quarantined candidates через strict LLM curator rubric",
+    )
+    questions_source_parser.set_defaults(handler=cmd_questions_source)
 
     session_parser = subparsers.add_parser(
         "session", parents=[shared_parent], help="Начать ежедневную сессию"
@@ -343,6 +401,201 @@ def format_review_question_for_cli(question: Question, topic_title: str) -> str:
             f"Reference: {question.reference_answer}",
         ]
     )
+
+
+def cmd_questions_audit(args: argparse.Namespace, services: AppServices) -> int:
+    try:
+        findings = services.question_quality_audit.audit(
+            topic_id=args.topic,
+            max_prompt_chars=args.max_prompt_chars,
+        )
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
+    topic_label = f" for topic #{args.topic}" if args.topic is not None else ""
+    if not findings:
+        print(f"Question quality audit{topic_label}: no findings.")
+        return 0
+
+    print(f"Question quality audit findings{topic_label}: {len(findings)}")
+    for finding in findings:
+        print()
+        print(format_question_quality_finding_for_cli(finding))
+    return 0
+
+
+def cmd_questions_cleanup(args: argparse.Namespace, services: AppServices) -> int:
+    try:
+        result = services.question_quality_audit.archive_accepted_generic_generated_questions(
+            topic_id=args.topic,
+        )
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
+    topic_label = f" for topic #{args.topic}" if args.topic is not None else ""
+    if not result.archived_questions:
+        print(f"Question quality cleanup{topic_label}: no accepted generic generated questions archived.")
+        return 0
+
+    print(
+        f"Question quality cleanup{topic_label}: archived "
+        f"{len(result.archived_questions)} accepted generic generated question(s)."
+    )
+    topics = {topic.id: topic.title for topic in services.questions.list_topics()}
+    for question in result.archived_questions:
+        print(f"#{question.id} topic={topics.get(question.topic_id, f'topic #{question.topic_id}')} status=archived")
+    return 0
+
+
+def format_question_quality_finding_for_cli(finding: QuestionQualityFinding) -> str:
+    question = finding.question
+    lines = [
+        f"#{question.id} kind={finding.kind} topic={finding.topic_title}",
+        (
+            f"source={question.source} "
+            f"source_quality={question.source_quality_status} "
+            f"status={question.source_quality_status}"
+        ),
+        f"detail={finding.detail}",
+        f"prompt={question.prompt}",
+    ]
+    if finding.duplicate_of_id is not None:
+        lines.insert(2, f"duplicate_of=#{finding.duplicate_of_id}")
+    return "\n".join(lines)
+
+
+def cmd_questions_source(args: argparse.Namespace, services: AppServices) -> int:
+    if args.action == "refresh":
+        result = services.question_sources.refresh(dry_run=args.dry_run)
+        mode = "dry-run" if result.dry_run else "saved"
+        print(f"Question source refresh {mode}: {len(result.snapshots)} whitelisted source(s).")
+        for snapshot in result.snapshots:
+            print()
+            print(format_question_source_snapshot_for_cli(snapshot))
+        if result.dry_run:
+            print("\nDry run: no source snapshots saved and no questions created.")
+        else:
+            print(f"\nSaved {result.saved_count} source snapshot metadata row(s); no questions created.")
+        return 0
+
+    if args.action == "candidates":
+        result = services.question_sources.create_source_backed_candidates(dry_run=args.dry_run)
+        mode = "dry-run" if result.dry_run else "saved"
+        print(f"Question source candidates {mode}: {len(result.candidates)} candidate question(s).")
+        if not result.candidates:
+            print("No source snapshots found. Run `questions-source refresh` first.")
+            return 0
+        topics = {topic.id: topic.title for topic in services.questions.list_topics()}
+        for question in result.candidates:
+            print()
+            print(format_source_backed_candidate_for_cli(question, topics.get(question.topic_id)))
+        if result.dry_run:
+            print("\nDry run: no candidate questions saved.")
+        else:
+            print(
+                "\nCreated "
+                f"{result.created_count} source-backed candidate question(s); "
+                f"skipped {result.skipped_count} existing or unavailable candidate(s)."
+            )
+        return 0
+
+    if args.action == "auto-curate":
+        try:
+            if args.dry_run:
+                result = services.question_auto_curation.preview_pending_source_backed_candidates(
+                    topic_id=args.topic,
+                    use_llm_curator=args.llm_curator,
+                )
+            else:
+                result = services.question_auto_curation.apply_pending_source_backed_candidates(
+                    topic_id=args.topic,
+                    use_llm_curator=args.llm_curator,
+                )
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        topic_label = f" for topic #{args.topic}" if args.topic is not None else ""
+        mode = "dry-run" if result.dry_run else "apply"
+        print(f"Question source auto-curation {mode}{topic_label}: {len(result.decisions)} pending candidate(s).")
+        if not result.decisions:
+            print("No pending source-backed candidates found.")
+            return 0
+        for decision in result.decisions:
+            print()
+            print(format_auto_curation_decision_for_cli(decision))
+        if result.dry_run:
+            suffix = " LLM curator rubric was enabled." if args.llm_curator else ""
+            print(f"\nDry run: no question statuses changed.{suffix}")
+        else:
+            mode_label = "auto-curation" if args.llm_curator else "deterministic"
+            print(
+                f"\nApplied {mode_label} decisions: "
+                f"accepted {result.accepted_count}, archived {result.archived_count}, "
+                f"quarantined {result.quarantined_count} left pending_auto_review."
+            )
+        return 0
+
+    print(f"Unsupported questions-source action: {args.action}", file=sys.stderr)
+    return 1
+
+
+def format_question_source_snapshot_for_cli(snapshot: QuestionSourceSnapshot) -> str:
+    return "\n".join(
+        [
+            f"{snapshot.source_id} title={snapshot.title}",
+            f"url={snapshot.url}",
+            (
+                f"retrieved_at={snapshot.retrieved_at.isoformat(timespec='seconds')} "
+                f"checksum={snapshot.checksum}"
+            ),
+            f"category_hints={', '.join(snapshot.category_hints)}",
+        ]
+    )
+
+
+def format_source_backed_candidate_for_cli(question: Question, topic_title: str | None) -> str:
+    topic_label = topic_title or f"topic #{question.topic_id}"
+    source_retrieved_at = (
+        question.source_retrieved_at.isoformat(timespec="seconds") if question.source_retrieved_at else "unknown"
+    )
+    return "\n".join(
+        [
+            f"#{question.id or '-'} topic={topic_label} status={question.source_quality_status}",
+            f"source={question.source} url={question.source_url or '-'} retrieved_at={source_retrieved_at}",
+            f"category_hints={', '.join(question.source_category_hints)}",
+            f"frequency_hint={question.source_frequency_hint or '-'}",
+            f"prompt={question.prompt}",
+        ]
+    )
+
+
+def format_auto_curation_decision_for_cli(decision: QuestionAutoCurationDecision) -> str:
+    question = decision.question
+    source_retrieved_at = (
+        question.source_retrieved_at.isoformat(timespec="seconds") if question.source_retrieved_at else "unknown"
+    )
+    lines = [
+        (
+            f"#{question.id or '-'} topic={decision.topic_title} "
+            f"decision={decision.decision} confidence={decision.confidence:.2f}"
+        ),
+        f"status={question.source_quality_status} source={question.source}",
+        f"url={question.source_url or '-'} retrieved_at={source_retrieved_at}",
+        f"category_hints={', '.join(question.source_category_hints) or '-'}",
+        f"frequency_hint={question.source_frequency_hint or '-'}",
+        f"quality_flags={', '.join(decision.quality_flags) or '-'}",
+        f"rationale={decision.rationale}",
+        f"prompt={question.prompt}",
+    ]
+    if decision.curator_score is not None:
+        lines.insert(-1, f"curator_score={decision.curator_score}")
+    if decision.curator_source_evidence:
+        lines.insert(-1, f"curator_source_evidence={decision.curator_source_evidence}")
+    if decision.duplicate_of_id is not None:
+        lines.insert(2, f"duplicate_of=#{decision.duplicate_of_id}")
+    return "\n".join(lines)
 
 
 def format_question_tags(tags: Sequence[Tag]) -> str:

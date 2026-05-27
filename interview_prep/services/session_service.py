@@ -11,6 +11,7 @@ from interview_prep.domain.models import (
     PracticeSessionAnswerDetail,
     PracticeSessionDetail,
     PracticeSessionSummary,
+    QUESTION_SOURCE_QUALITY_ACCEPTED,
     Question,
     SESSION_STATUS_COMPLETED,
     Session,
@@ -191,7 +192,10 @@ class SessionService:
         session = self.repository.get_session(session_id)
         if session is None:
             raise ValueError(f"Unknown session id: {session_id}")
-        questions = self.repository.list_questions(session.topic_id)
+        questions = self.repository.list_questions(
+            session.topic_id,
+            source_quality_status=QUESTION_SOURCE_QUALITY_ACCEPTED,
+        )
         if session.topic_id is not None:
             return self._prioritize_questions_for_practice(questions, now=now)
         return self._prioritize_questions_by_weak_topics(questions, now=now)
