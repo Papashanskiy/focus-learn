@@ -6,7 +6,12 @@
 
 Главные текущие проблемы:
 
-- Полноценный curriculum lifecycle еще не заменил bootstrap полностью: `infra/seed.py` оставляет минимальный fallback-набор тем и по одному общему вопросу на тему.
+- После ревью и проверки локальной SQLite-базы качество вопросов стало главным продуктовым blocker: в accepted generated questions уже есть слишком общие сценарии, а часть pending LLM seed вопросов выглядит как шаблонные prompts без конкретного interview-сигнала.
+- Базовый curated-набор частых вопросов с собеседований отсутствует: `infra/seed.py` оставляет минимальный fallback-набор тем и по одному общему вопросу на тему, а первый запуск не гарантирует покрытие Python core, coding screen, API/web, SQL/Postgres, async/queues, system design, testing и ops.
+- Content curation сейчас слишком ручной: `questions-review` требует от пользователя принимать решения об approve/archive, хотя целевой flow должен автоматически принимать high-confidence source-backed вопросы и оставлять человеку только audit/undo.
+- Интерфейс TUI перегружен рабочими окнами, служебными командами и secondary surfaces; нужен минималистичный режим с game-like menu выбора режима и одним очевидным следующим действием.
+- Фоновая генерация контента происходит неравномерно и может простаивать; приложению нужен always-on scheduler, который сам держит запас вопросов/материалов/scenarios по gaps и refresh policy.
+- После code review в backlog добавлены системные follow-ups: `CURRENT_SCHEMA_VERSION` отстает от фактических migration steps, failed content jobs не используют retry/backoff автоматически, а пустая CLI practice session может попасть в статистику как `completed`.
 - Фоновая генерация контента уже умеет генерировать вопросы, учебные материалы и system design scenarios; TUI автоматически ставит эти задачи, показывает компактный статус очереди/последний результат в верхней строке, имеет экран `/materials` для просмотра/выбора generated artifacts и экран `/content` для списка queued/running/failed jobs с безопасным retry failed job. Полноценное управление очередью из TUI еще не готово.
 - TUI layout уже движется к focused/mode-aware интерфейсу; learning dialog сохраняется с session/context metadata, восстанавливается по теме с компактной навигацией длинного диалога и доступен в history как отдельные учебные сессии.
 - Читаемость AI-диалогов в TUI уже улучшена единым renderer в learning, system design и daily practice review, но markdown из LLM пока часто отображается как сырой текст.
@@ -38,6 +43,8 @@
 - Это не одноразовый MVP, а приложение с фичами, которые должны использоваться и развиваться дальше.
 - Главная цель UX: снизить когнитивную нагрузку пользователя. Пользователь должен открыть приложение и сразу заниматься, а не думать, какую команду запустить, что сгенерировать или где искать следующий шаг.
 - LLM должна незаметно помогать подготовке: предлагать темы, заранее готовить вопросы, объяснения и system design сценарии, а не требовать ручного запуска служебных команд.
+- Content curation должна быть automated-by-default: LLM и deterministic quality gates принимают рутинные решения, а пользователь видит только понятный аудит, undo и редкие quarantine cases.
+- Основной TUI должен быть минималистичным: стартовое menu выбирает режим, focused screen показывает одно учебное действие, а служебные экраны доступны как advanced/debug, не как основной рабочий поток.
 - TUI должен фокусировать экран на текущем учебном действии. Если пользователь в режиме обучения, основное пространство должно быть занято объяснением и диалогом, а не простаивающими панелями.
 - Senior readiness должен измеряться по наблюдаемым компетенциям и evidence, а не по общему ощущению прогресса. Любая рекомендация следующего шага должна объяснять, какой gap она закрывает.
 
@@ -294,6 +301,52 @@
 ## Next
 
 Работать сверху вниз. Каждый незакрытый checkbox ниже должен быть достаточно маленьким для одной итерации Codex loop.
+
+### 0A. Review follow-up: question quality and interview coverage
+
+- [ ] Content quality audit: добавить CLI/script для повторяемого аудита вопросов в SQLite и вывода generic/duplicate/too-long questions с `id`, `source`, `source_quality`, `status`, `topic`.
+- [ ] Content quality cleanup: перевести найденные accepted generic generated questions в `archived` или `pending_review` и покрыть тестом, что archived questions не попадают в practice selection.
+- [ ] Question source research: завести markdown-заметку с использованными external sources и синтезированным списком популярных interview questions/categories; формулировки писать своими словами, без дословного копирования списков из интернета.
+- [ ] Source refresh foundation: добавить `questions-source refresh --dry-run`, который по whitelist источников сохраняет source snapshot metadata (`url`, `retrieved_at`, `title`, checksum, category hints) без автоматического попадания в practice.
+- [ ] Source-backed candidates: преобразовывать source research/snapshots в собственные candidate questions с `source_url`, `source_retrieved_at`, category/frequency hints и статусом `pending_auto_review`, без дословного копирования external lists.
+- [ ] Auto-curation contract: добавить deterministic gates + LLM curator rubric, который автоматически принимает high-confidence source-backed questions, архивирует obvious generic/duplicate candidates и отправляет ambiguous cases в quarantine.
+- [ ] Auto-curation audit: сохранять curator score, rationale, model/version, source evidence и decision (`auto_accepted`, `auto_archived`, `quarantined`), чтобы пользователь мог посмотреть и откатить решение, но не обязан approve вручную.
+- [ ] Canonical questions: на основе source research добавить non-LLM seed pack `canonical-2026` с первой партией из 40 must-know вопросов для Python core, coding screen, API/web, SQL/Postgres, async/queues, system design, testing и ops.
+- [ ] Canonical metadata: хранить для seeded questions frequency/type/competency metadata через существующие tags/competencies; добавлять новую схему только если tags не покрывают `must_know`, `coding`, `api`, `db`, `system_design`.
+- [ ] Practice selection: при first-run baseline, Today drill и mock interview отдавать приоритет accepted canonical must-know questions перед generated accepted questions, сохраняя повторение weak topics.
+- [ ] Content quality gate: отклонять или отправлять на review generated prompts с generic wording вроде "ключевой production-риск", "backend-flow" или "какие tradeoffs" без конкретного scenario, constraints и ожидаемых mechanisms.
+- [ ] Curriculum fallback: заменить generic `fallback_questions()` templates на конкретные canonical-style fallback questions и добавить regression-тесты на специфичность fallback prompts.
+- [ ] Curation observability UX: переделать CLI/TUI `questions-review` в audit/undo surface, где видны quality flags, source, frequency metadata и LLM rationale, но ручной approve не является обязательным happy path.
+- [ ] Docs: после source refresh, auto-curation, canonical pack и quality gate обновить `README.md`, `DEVELOPMENT_LOG.md` и `ROADMAP.md`: описать refresh/audit flow, источники покрытия, automated approval policy и приоритет canonical questions.
+
+### 0B. Review follow-up: reliability and migration hygiene
+
+- [ ] Migrations: поднять `CURRENT_SCHEMA_VERSION` до последней migration step и добавить regression-тест, который падает при рассинхронизации schema version и migrations.
+- [ ] Content generation retry: привести retry/backoff к одному контракту - automatic requeue transient failures until `max_attempts` или explicit manual-only retry без неиспользуемого backoff state; предпочтительно automatic retry для TUI worker.
+- [ ] CLI session status: завершать пустой legacy CLI `session` через `abandon_if_empty=True` и добавить regression-тест, что `/quit` без ответов не влияет на stats/readiness как completed session.
+- [ ] Docs: если меняются retry semantics, CLI session outcome или schema-version policy, обновить `README.md`, `DEVELOPMENT_LOG.md` и этот roadmap в той же итерации.
+
+### 0C. Low-friction TUI: minimal mode and game-like menu
+
+- [ ] TUI UX inventory: перечислить текущие first-screen actions, panes, slash commands and secondary surfaces; отметить, какие элементы должны уйти из default minimal flow в advanced/debug.
+- [ ] Main menu foundation: добавить game-like стартовое menu с выбором режима `Today`, `Practice`, `Learn`, `Mock Interview`, `System Design`, `Readiness`, `Settings` через arrows/Enter и мышь.
+- [ ] Minimal mode layout: добавить `minimal` visual mode, где default screen показывает один central task, один primary action, короткий progress/readiness signal и скрывает служебные очереди/materials/review panes.
+- [ ] Progressive disclosure: перенести `/content`, `/materials`, `/questions-review`, raw history/debug детали и queue controls в advanced menu, сохранив slash commands как power-user fallback.
+- [ ] Practice focus screen: в minimal mode показывать вопрос, ответ, feedback/self-score step и next action без перегруженных side panels.
+- [ ] Learn/System Design focus screens: в minimal mode показывать только текущий диалог/artifact и contextual next action; notebook/materials доступны через menu, а не постоянные панели.
+- [ ] TUI tests: добавить regression-тесты menu navigation, minimal mode entry, возврата в menu и отсутствия overlapping panes в ключевых flows.
+- [ ] Docs: при изменении TUI default mode обновить `README.md`, `DEVELOPMENT_LOG.md` и roadmap notes с описанием minimal/advanced modes.
+
+### 0D. Always-on content generation and refresh
+
+- [ ] Content demand model: определить минимальные запасы accepted/candidate questions, learning materials и system design scenarios по competency/topic, readiness gaps и upcoming modes.
+- [ ] Background scheduler: добавить always-on planner, который при запуске TUI сам ставит jobs до target запасов, учитывает cooldowns, model availability, attempts и не требует ручного `/generate-*`.
+- [ ] Idle generation loop: продолжать генерацию, пока есть deficits и budget, даже если пользователь находится в practice/learn/menu; показывать только компактный статус в minimal mode.
+- [ ] Source refresh cadence: добавить staleness policy для source snapshots и automatic reminder/job, когда sources старше заданного периода.
+- [ ] Queue prioritization: сначала генерировать/курировать вопросы для weak competencies и canonical coverage gaps, затем materials/reference answers/scenarios.
+- [ ] Safety controls: добавить config limits для daily job budget, max concurrent local LLM calls, pause/resume и network/source refresh enablement.
+- [ ] Tests: покрыть scheduler decisions, no-idle refill, retry interaction и budget limits unit/regression-тестами без реальных LLM/network calls.
+- [ ] Docs: после always-on scheduler обновить `README.md`, `DEVELOPMENT_LOG.md` и troubleshooting по pause/resume, budgets и source refresh.
 
 ### 0. User feedback: TUI navigation and learning entry
 
@@ -588,13 +641,14 @@
 - Уже пройденные practice sessions видны в read-only `/history` с деталями ответов; session outcomes уже имеют SQLite/repository storage foundation, создаются автоматически для completed sessions с ответами и показываются на TUI ended screen и через `/finish-session`, но пока не показываются в history/CLI.
 - AI-объяснения из learning mode и named manual notes уже доступны через `/notebook`; topic/subtopic/competency filters подключены, но edit/delete flow для named manual notes пока нет.
 - System Design Mock Interview сохраняет transcript, design artifact sections, промежуточные `/sd-checkpoint` и `/sd-pressure` как interviewer transcript messages, итоговый feedback artifact, seeded system design rubric dimensions и structured rubric evaluation после `/sd-feedback`; TUI history показывает final feedback и rubric scores через `/history system-design`, а CLI `system-design-history` показывает saved scenarios, transcript, artifacts, feedback и rubric scores.
-- В `infra/seed.py` остается минимальный bootstrap/fallback по одному общему вопросу на тему; полноценный generated curriculum lifecycle еще не стал first-run default.
+- Вопросная база сейчас недостаточно curated: `infra/seed.py` остается минимальным bootstrap/fallback, generated accepted questions могут быть слишком общими, а first-run flow не гарантирует базовый набор частых interview questions. План исправления вынесен в `## Next` / `0A`.
 - Generated curriculum structure из `generate-seed` сохраняется идемпотентно: topics переиспользуются по `slug`/`source`, subtopics — по parent/`slug`/`source`, objectives — по scope/text/source.
-- Generated questions/materials/scenarios уже сохраняются; generated questions проходят консервативный same-topic duplicate check и pending review через CLI/TUI. Background generated questions уже получают автопривязку tags/known competencies из LLM metadata.
+- Generated questions/materials/scenarios уже сохраняются; generated questions проходят консервативный same-topic duplicate check и pending review через CLI/TUI. Background generated questions уже получают автопривязку tags/known competencies из LLM metadata, но ручной review пока остается обязательным для approve вместо automated-by-default curation.
 - TUI `/materials` уже показывает generated artifacts, версии artifacts внутри темы, latest/конкретный выбор, preview полного artifact без входа в другой режим, выбрать сохраненный material/scenario, фильтровать learning materials и system design scenarios по текущему контексту или всем темам, а также архивировать неудачные learning materials и system design scenarios через `/archive-material <id> confirm [reason]` и `/archive-scenario <id> confirm [reason]`.
-- TUI `/content` уже показывает список queued/running/failed generation jobs, `/generate-curriculum` ставит background curriculum job, TUI worker можно ставить на паузу через `/pause-content`, возобновлять через `/resume-content` и безопасно возвращать failed job в queued через `/retry-job <id>`. CLI `content-enqueue --kind reference-answer` ставит регенерацию эталонных ответов существующих вопросов темы.
+- TUI `/content` уже показывает список queued/running/failed generation jobs, `/generate-curriculum` ставит background curriculum job, TUI worker можно ставить на паузу через `/pause-content`, возобновлять через `/resume-content` и безопасно возвращать failed job в queued через `/retry-job <id>`. Автоматический retry/backoff для failed jobs еще нужно привести к явному контракту, а scheduler пока не держит постоянный запас контента без ручных команд. CLI `content-enqueue --kind reference-answer` ставит регенерацию эталонных ответов существующих вопросов темы.
 - TUI использует многострочный composer вместо однострочного input bar; Enter отправляет сообщение, Shift+Enter вставляет newline, а длинный draft расширяет composer до capped scrollable области.
+- TUI default surface пока перегружен служебными окнами и командами; minimal/game-like menu mode еще не реализован, поэтому пользователь видит больше инфраструктуры, чем подготовки.
 - Теги вопросов уже хранятся в SQLite и отображаются в CLI `questions` и TUI practice workflow; CLI `questions --tag <slug>` фильтрует список вопросов по тегу.
 - AI feedback зависит от доступности локальной Ollama; при недоступности после timeout возвращается fallback checklist.
-- Статистика простая и пока не строит readiness dashboard, competency coverage и rubric-score динамику.
-- Старый CLI `session` не спрашивает self-score и не участвует в новом rubric workflow; TUI остается основным интерфейсом practice.
+- Readiness dashboard и competency coverage уже есть, но их качество зависит от curated question coverage, canonical must-know questions и достаточного evidence по каждой competency.
+- Старый CLI `session` не спрашивает self-score и не участвует в новом rubric workflow; TUI остается основным интерфейсом practice. Пустые legacy CLI sessions должны завершаться как `abandoned`, а не попадать в completed stats.
