@@ -162,12 +162,20 @@ def _rubric_dimension(row: sqlite3.Row) -> RubricDimension:
 
 
 def _answer_evaluation_score(row: sqlite3.Row) -> AnswerEvaluationScore:
+    manual_override_at = row["manual_override_at"] if "manual_override_at" in row.keys() else None
     return AnswerEvaluationScore(
         dimension=_rubric_dimension(row),
         score=row["score"],
         evidence=row["evidence"],
         gaps=row["gaps"],
         next_drill=row["next_drill"],
+        manual_override_score=row["manual_override_score"]
+        if "manual_override_score" in row.keys()
+        else None,
+        manual_override_reason=row["manual_override_reason"]
+        if "manual_override_reason" in row.keys()
+        else None,
+        manual_override_at=_dt(manual_override_at) if manual_override_at else None,
     )
 
 
@@ -1467,6 +1475,52 @@ class SQLiteRepository:
             )
         return self.get_answer_evaluation(row["id"])
 
+    def override_answer_evaluation_score(
+        self,
+        evaluation_id: int,
+        dimension_slug: str,
+        score: int,
+        *,
+        reason: str | None = None,
+        overridden_at: datetime | None = None,
+    ) -> AnswerEvaluation | None:
+        if score < 1 or score > 5:
+            raise ValueError("Manual rubric override score must be between 1 and 5.")
+        row = self.connection.execute(
+            """
+            SELECT aes.evaluation_id, aes.rubric_dimension_id
+            FROM answer_evaluation_scores aes
+            JOIN rubric_dimensions rd ON rd.id = aes.rubric_dimension_id
+            WHERE aes.evaluation_id = ?
+              AND rd.slug = ?
+            """,
+            (evaluation_id, dimension_slug),
+        ).fetchone()
+        if row is None:
+            return None
+
+        override_time = overridden_at or datetime.now()
+        clean_reason = reason.strip() if reason else None
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE answer_evaluation_scores
+                SET manual_override_score = ?,
+                    manual_override_reason = ?,
+                    manual_override_at = ?
+                WHERE evaluation_id = ?
+                  AND rubric_dimension_id = ?
+                """,
+                (
+                    score,
+                    clean_reason,
+                    override_time.isoformat(timespec="seconds"),
+                    row["evaluation_id"],
+                    row["rubric_dimension_id"],
+                ),
+            )
+        return self.get_answer_evaluation(evaluation_id)
+
     def _list_answer_evaluation_scores(self, evaluation_id: int) -> list[AnswerEvaluationScore]:
         rows = self.connection.execute(
             """
@@ -1479,7 +1533,10 @@ class SQLiteRepository:
                 aes.score,
                 aes.evidence,
                 aes.gaps,
-                aes.next_drill
+                aes.next_drill,
+                aes.manual_override_score,
+                aes.manual_override_reason,
+                aes.manual_override_at
             FROM answer_evaluation_scores aes
             JOIN rubric_dimensions rd ON rd.id = aes.rubric_dimension_id
             WHERE aes.evaluation_id = ?
@@ -1582,7 +1639,7 @@ class SQLiteRepository:
                 )
             ),
             rubric_by_answer AS (
-                SELECT le.answer_id, AVG(aes.score) AS avg_rubric_score
+                SELECT le.answer_id, AVG(COALESCE(aes.manual_override_score, aes.score)) AS avg_rubric_score
                 FROM latest_evaluations le
                 JOIN answer_evaluation_scores aes ON aes.evaluation_id = le.id
                 GROUP BY le.answer_id
@@ -3046,7 +3103,10 @@ class SQLiteRepository:
                 sdes.score,
                 sdes.evidence,
                 sdes.gaps,
-                sdes.next_drill
+                sdes.next_drill,
+                NULL AS manual_override_score,
+                NULL AS manual_override_reason,
+                NULL AS manual_override_at
             FROM system_design_evaluation_scores sdes
             JOIN system_design_rubric_dimensions rd
               ON rd.id = sdes.system_design_rubric_dimension_id

@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 
 DEFAULT_DB_PATH = Path("data/interview_prep.db")
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 14
 
 
 class MigrationStep(NamedTuple):
@@ -290,6 +290,9 @@ CREATE TABLE IF NOT EXISTS answer_evaluation_scores (
     evidence TEXT NOT NULL,
     gaps TEXT NOT NULL,
     next_drill TEXT,
+    manual_override_score INTEGER CHECK (manual_override_score BETWEEN 1 AND 5),
+    manual_override_reason TEXT,
+    manual_override_at TEXT,
     PRIMARY KEY (evaluation_id, rubric_dimension_id)
 );
 """,
@@ -485,6 +488,14 @@ def init_db(connection: sqlite3.Connection) -> None:
         "outcome_type",
         "TEXT NOT NULL DEFAULT 'practice' CHECK (outcome_type IN ('practice', 'calibration_baseline'))",
     )
+    _ensure_column(
+        connection,
+        "answer_evaluation_scores",
+        "manual_override_score",
+        "INTEGER CHECK (manual_override_score BETWEEN 1 AND 5)",
+    )
+    _ensure_column(connection, "answer_evaluation_scores", "manual_override_reason", "TEXT")
+    _ensure_column(connection, "answer_evaluation_scores", "manual_override_at", "TEXT")
     _backfill_session_status(connection)
     connection.execute(
         """

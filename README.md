@@ -177,12 +177,22 @@ python -m interview_prep stats
 
 ```bash
 python -m interview_prep evaluations --answer 1
+python -m interview_prep evaluation-override --evaluation 1 --dimension correctness --score 4 --reason "AI недооценила конкретику ответа"
 ```
+
+`evaluation-override` сохраняет manual override для одной rubric dimension: в `evaluations` остается виден original AI score и причина ручной правки.
 
 Просмотр сохраненного итога завершенной practice session:
 
 ```bash
 python -m interview_prep session-summary 1
+```
+
+Markdown-отчет перед интервью по последней или выбранной completed session:
+
+```bash
+python -m interview_prep interview-report
+python -m interview_prep interview-report --session 1
 ```
 
 Просмотр сохраненной system design history:

@@ -1,5 +1,37 @@
 # Development Log
 
+## 2026-05-26
+
+### Calibration manual override readiness regression
+
+- Закрыт roadmap leaf про regression-тест manual override readiness: добавлен service-level test, который сначала фиксирует low rubric readiness gap, затем применяет manual overrides как effective scores и проверяет рост readiness signal без потери original AI scores для аудита.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_evaluation_service_manual_override_keeps_original_score_metadata tests.test_services.ServiceTests.test_readiness_uses_manual_override_scores_while_preserving_original_audit tests.test_services.ServiceTests.test_readiness_service_aggregates_competency_practice_signals -v`, `python -m compileall interview_prep`.
+
+### Calibration rubric manual override readiness
+
+- Закрыт roadmap leaf про manual override readiness: readiness aggregates теперь считают `avg_rubric_score` через `COALESCE(manual_override_score, score)`, а session outcome summary/strengths/gaps/readiness delta используют `AnswerEvaluationScore.effective_score`.
+- `interview-report` теперь строит rubric gaps по effective score и помечает manual override рядом с original AI score в evidence section; CLI override сразу пересобирает completed session outcome, а устаревшие low-score drills не попадают в outcome, если dimension исправлена override до сильного score.
+- Родительский manual override item закрыт, потому что foundation и effective-score surfaces завершены; отдельный regression-test leaf остается следующим в `## Next`.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_evaluation_service_manual_override_keeps_original_score_metadata tests.test_services.ServiceTests.test_readiness_service_aggregates_competency_practice_signals tests.test_services.ServiceTests.test_readiness_service_scores_competencies_with_gap_reasons tests.test_services.ServiceTests.test_finish_session_generates_session_outcome_from_scores_and_evaluations -v`, `python -m unittest tests.test_cli_flow.CLIFlowTests.test_evaluations_command_shows_saved_rubric_evaluation_for_answer tests.test_cli_flow.CLIFlowTests.test_evaluation_override_command_updates_one_dimension_with_audit_text tests.test_cli_flow.CLIFlowTests.test_interview_report_command_exports_markdown -v`, `python -m compileall interview_prep`.
+
+### Calibration rubric manual override foundation
+
+- Первый open roadmap item про manual override rubric score был слишком крупным для одной итерации, поэтому он разбит в `## Next` на foundation и readiness leaves.
+- Закрыт foundation leaf: `answer_evaluation_scores` получил audit-поля manual override, `EvaluationService.override_score()` и CLI `evaluation-override` позволяют исправить одну rubric dimension, а `evaluations --answer` показывает effective score рядом с original AI score и reason.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_init_db_creates_schema_version_table_with_current_version tests.test_services.ServiceTests.test_init_db_upgrades_legacy_practice_database_to_current_schema tests.test_services.ServiceTests.test_init_db_creates_rubric_evaluation_storage tests.test_services.ServiceTests.test_evaluation_service_manual_override_keeps_original_score_metadata -v`, `python -m unittest tests.test_cli_flow.CLIFlowTests.test_evaluations_command_shows_saved_rubric_evaluation_for_answer tests.test_cli_flow.CLIFlowTests.test_evaluation_override_command_updates_one_dimension_with_audit_text -v`, `python -m compileall interview_prep`.
+
+### Calibration interview report export
+
+- Закрыт roadmap leaf про Markdown export `interview-report`: добавлен read-only `InterviewReportService`, который собирает latest или выбранную completed practice session, readiness snapshot, session outcome, evidence answers и next plan.
+- CLI-команда `python -m interview_prep interview-report [--session <id>]` печатает Markdown в stdout без изменения SQLite; README получил короткий пример команды.
+- Проверки: `python -m unittest tests.test_cli_flow.CLIFlowTests.test_content_generation_commands_are_registered tests.test_cli_flow.CLIFlowTests.test_interview_report_command_exports_markdown -v`, `python -m compileall interview_prep`.
+
+### Calibration repeat baseline delta comparison
+
+- Закрыт roadmap leaf про baseline delta comparison: повторная baseline session теперь сохраняет в `SessionOutcome.summary` сравнение текущего `readiness_delta` с предыдущей completed baseline session.
+- TUI finish-session screen уже показывает это сравнение через общий renderer session outcome; negative change дополнительно попадает в gaps baseline outcome.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_calibration_marks_baseline_session_outcome tests.test_services.ServiceTests.test_calibration_repeat_outcome_compares_delta_to_previous_baseline tests.test_services.ServiceTests.test_calibration_baseline_repeat_status_uses_seven_day_interval -v`, `python -m unittest tests.test_tui.TUITests.test_tui_repeat_baseline_finish_shows_delta_comparison tests.test_tui.TUITests.test_tui_baseline_finish_marks_session_outcome tests.test_tui.TUITests.test_tui_today_shows_due_repeat_baseline_action tests.test_tui.TUITests.test_tui_enter_starts_due_repeat_baseline_session -v`, `python -m compileall interview_prep`. Project `.venv/bin/python` отсутствовал в текущем checkout, поэтому проверки выполнены через доступный `python`.
+
 ## 2026-05-25
 
 ### Calibration repeat TUI action

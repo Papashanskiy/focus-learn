@@ -279,6 +279,33 @@ class EvaluationService:
     def list_answer_evaluations(self, answer_id: int) -> list[AnswerEvaluation]:
         return self.repository.list_answer_evaluations_for_answer(answer_id)
 
+    def override_score(
+        self,
+        evaluation_id: int,
+        *,
+        dimension_slug: str,
+        score: int,
+        reason: str | None = None,
+        overridden_at: datetime | None = None,
+    ) -> AnswerEvaluation:
+        dimension = dimension_slug.strip()
+        if not dimension:
+            raise ValueError("Rubric dimension slug is required.")
+        if score < 1 or score > 5:
+            raise ValueError("Manual rubric override score must be between 1 and 5.")
+        evaluation = self.repository.override_answer_evaluation_score(
+            evaluation_id,
+            dimension,
+            score,
+            reason=reason,
+            overridden_at=overridden_at,
+        )
+        if evaluation is None:
+            raise ValueError(
+                f"Rubric score not found for evaluation #{evaluation_id} and dimension '{dimension}'."
+            )
+        return evaluation
+
     def _evaluate_answer_heuristically(
         self,
         question: Question,

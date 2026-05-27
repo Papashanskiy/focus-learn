@@ -127,6 +127,13 @@ class AnswerEvaluationScore:
     evidence: str
     gaps: str
     next_drill: str | None = None
+    manual_override_score: int | None = None
+    manual_override_reason: str | None = None
+    manual_override_at: datetime | None = None
+
+    @property
+    def effective_score(self) -> int:
+        return self.manual_override_score if self.manual_override_score is not None else self.score
 
 
 @dataclass(frozen=True)

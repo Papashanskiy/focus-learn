@@ -91,6 +91,7 @@ class CLIFlowTests(unittest.TestCase):
         self.assertIn("questions-review", process.stdout)
         self.assertIn("evaluations", process.stdout)
         self.assertIn("session-summary", process.stdout)
+        self.assertIn("interview-report", process.stdout)
         self.assertIn("system-design-history", process.stdout)
 
     def test_content_enqueue_accepts_non_question_kinds(self) -> None:
@@ -631,6 +632,91 @@ class CLIFlowTests(unittest.TestCase):
         self.assertIn("Gaps:", process.stdout)
         self.assertIn("Next drills:", process.stdout)
 
+    def test_evaluation_override_command_updates_one_dimension_with_audit_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "evaluation_override.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            question = repository.list_questions()[0]
+            session = repository.create_session(
+                Session(
+                    id=None,
+                    topic_id=question.topic_id,
+                    started_at=datetime(2026, 5, 26, 9, 0, 0),
+                    ended_at=None,
+                    target_minutes=60,
+                )
+            )
+            answer = repository.add_answer(
+                Answer(
+                    id=None,
+                    session_id=session.id or 0,
+                    question_id=question.id or 0,
+                    user_answer="Кандидат явно назвал tradeoffs, rollback и метрики.",
+                    self_score=4,
+                    ai_feedback="Feedback.",
+                    answered_at=datetime(2026, 5, 26, 9, 10, 0),
+                )
+            )
+            evaluation = EvaluationService(repository).evaluate_and_store_answer(
+                answer,
+                question,
+                use_llm=False,
+            )
+            dimension_slug = evaluation.scores[0].dimension.slug
+            original_score = evaluation.scores[0].score
+            override_score = 5 if original_score != 5 else 4
+            repository.close()
+
+            override_process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "evaluation-override",
+                    "--evaluation",
+                    str(evaluation.id),
+                    "--dimension",
+                    dimension_slug,
+                    "--score",
+                    str(override_score),
+                    "--reason",
+                    "AI недооценила конкретику ответа",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            show_process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "evaluations",
+                    "--answer",
+                    str(answer.id),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(override_process.returncode, 0, override_process.stderr)
+        self.assertIn(f"{dimension_slug} {override_score}/5", override_process.stdout)
+        self.assertIn(f"original {original_score}/5", override_process.stdout)
+        self.assertEqual(show_process.returncode, 0, show_process.stderr)
+        self.assertIn("manual override", show_process.stdout)
+        self.assertIn(f"original {original_score}/5", show_process.stdout)
+        self.assertIn("Override reason: AI недооценила конкретику ответа", show_process.stdout)
+
     def test_session_summary_command_shows_saved_session_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "session_summary.db"
@@ -688,6 +774,79 @@ class CLIFlowTests(unittest.TestCase):
         self.assertIn("Gaps:", process.stdout)
         self.assertIn("- Не описал DLQ и observability.", process.stdout)
         self.assertIn("Next drills:", process.stdout)
+
+    def test_interview_report_command_exports_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "interview_report.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            topic = repository.list_topics()[0]
+            question = repository.list_questions(topic.id)[0]
+            session = repository.create_session(
+                Session(
+                    id=None,
+                    topic_id=topic.id,
+                    started_at=datetime(2026, 5, 21, 9, 0, 0),
+                    ended_at=None,
+                    target_minutes=60,
+                )
+            )
+            repository.add_answer(
+                Answer(
+                    id=None,
+                    session_id=session.id or 0,
+                    question_id=question.id or 0,
+                    user_answer="Я описал retries, идемпотентность и базовый мониторинг.",
+                    self_score=4,
+                    ai_feedback="Хорошо: есть retries. Упущено: DLQ и SLO.",
+                    answered_at=datetime(2026, 5, 21, 9, 10, 0),
+                )
+            )
+            repository.finish_session(session.id or 0, datetime(2026, 5, 21, 9, 45, 0))
+            repository.upsert_session_outcome(
+                SessionOutcome(
+                    id=None,
+                    session_id=session.id or 0,
+                    summary="Сильная практика перед интервью.",
+                    strengths=["Связал retries с идемпотентностью."],
+                    gaps=["Не хватило observability evidence."],
+                    next_drills=["Повторить DLQ и retry boundaries."],
+                    readiness_delta=0.1,
+                    created_at=datetime(2026, 5, 21, 9, 46, 0),
+                )
+            )
+            repository.close()
+
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "interview-report",
+                    "--session",
+                    str(session.id),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("# Interview Report", process.stdout)
+        self.assertIn("## Strengths", process.stdout)
+        self.assertIn("- Связал retries с идемпотентностью.", process.stdout)
+        self.assertIn("## Gaps", process.stdout)
+        self.assertIn("- Не хватило observability evidence.", process.stdout)
+        self.assertIn("## Evidence Answers", process.stdout)
+        self.assertIn(f"### Answer #1", process.stdout)
+        self.assertIn("Candidate evidence: Я описал retries", process.stdout)
+        self.assertIn("## Next Plan", process.stdout)
+        self.assertIn("- Повторить DLQ и retry boundaries.", process.stdout)
 
     def test_system_design_history_command_shows_feedback_detail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -9,6 +9,7 @@ from interview_prep.services.content_generation_service import ContentGeneration
 from interview_prep.services.calibration_service import CalibrationService
 from interview_prep.services.curriculum_service import CurriculumService
 from interview_prep.services.evaluation_service import EvaluationService
+from interview_prep.services.interview_report_service import InterviewReportService
 from interview_prep.services.question_service import QuestionService
 from interview_prep.services.readiness_service import ReadinessService
 from interview_prep.services.learning_service import LearningService
@@ -47,6 +48,7 @@ class AppServices:
         self.sessions = SessionService(self.repository, self.llm)
         self.stats = StatsService(self.repository)
         self.readiness = ReadinessService(self.repository)
+        self.interview_report = InterviewReportService(self.repository, self.readiness)
         self.read = ReadOnlyApplicationFacade(
             questions=self.questions,
             sessions=self.sessions,

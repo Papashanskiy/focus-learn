@@ -9,6 +9,7 @@ from interview_prep.domain.models import (
     AnswerEvaluation,
     Question,
     QuestionCompetencyLink,
+    SESSION_STATUS_COMPLETED,
     SessionOutcome,
     SystemDesignArtifact,
     SystemDesignEvaluation,
@@ -177,6 +178,17 @@ def build_parser() -> argparse.ArgumentParser:
     evaluations_parser.add_argument("--answer", type=int, required=True, help="ID ответа")
     evaluations_parser.set_defaults(handler=cmd_evaluations)
 
+    evaluation_override_parser = subparsers.add_parser(
+        "evaluation-override",
+        parents=[shared_parent],
+        help="Вручную исправить score одной rubric dimension с audit metadata",
+    )
+    evaluation_override_parser.add_argument("--evaluation", type=int, required=True, help="ID rubric evaluation")
+    evaluation_override_parser.add_argument("--dimension", required=True, help="Slug rubric dimension")
+    evaluation_override_parser.add_argument("--score", type=int, required=True, help="Manual score 1..5")
+    evaluation_override_parser.add_argument("--reason", default="", help="Почему AI score исправлен")
+    evaluation_override_parser.set_defaults(handler=cmd_evaluation_override)
+
     session_summary_parser = subparsers.add_parser(
         "session-summary",
         parents=[shared_parent],
@@ -184,6 +196,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     session_summary_parser.add_argument("session_id", type=int, help="ID practice session")
     session_summary_parser.set_defaults(handler=cmd_session_summary)
+
+    interview_report_parser = subparsers.add_parser(
+        "interview-report",
+        parents=[shared_parent],
+        help="Export Markdown interview readiness report",
+    )
+    interview_report_parser.add_argument(
+        "--session",
+        type=int,
+        help="ID completed practice session; defaults to latest completed session",
+    )
+    interview_report_parser.add_argument(
+        "--answers",
+        type=int,
+        default=5,
+        help="Сколько evidence answers включить",
+    )
+    interview_report_parser.set_defaults(handler=cmd_interview_report)
 
     system_design_history_parser = subparsers.add_parser(
         "system-design-history",
@@ -561,6 +591,35 @@ def cmd_evaluations(args: argparse.Namespace, services: AppServices) -> int:
     return 0
 
 
+def cmd_evaluation_override(args: argparse.Namespace, services: AppServices) -> int:
+    try:
+        evaluation = services.evaluations.override_score(
+            args.evaluation,
+            dimension_slug=args.dimension,
+            score=args.score,
+            reason=args.reason,
+        )
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
+    score = next(
+        (item for item in evaluation.scores if item.dimension.slug == args.dimension.strip()),
+        None,
+    )
+    if score is None:
+        print(f"Override сохранен для evaluation #{evaluation.id}.")
+        return 0
+    session = services.repository.get_session(evaluation.session_id)
+    if session is not None and session.status == SESSION_STATUS_COMPLETED:
+        services.sessions.generate_session_outcome(evaluation.session_id)
+    print(
+        f"Override сохранен: evaluation #{evaluation.id}, "
+        f"{score.dimension.slug} {score.effective_score}/5 (original {score.score}/5)."
+    )
+    return 0
+
+
 def cmd_session_summary(args: argparse.Namespace, services: AppServices) -> int:
     try:
         outcome = services.sessions.get_session_outcome(args.session_id)
@@ -572,6 +631,19 @@ def cmd_session_summary(args: argparse.Namespace, services: AppServices) -> int:
         return 1
 
     print(format_session_outcome_for_cli(outcome))
+    return 0
+
+
+def cmd_interview_report(args: argparse.Namespace, services: AppServices) -> int:
+    try:
+        report = services.interview_report.markdown(
+            session_id=args.session,
+            answer_limit=args.answers,
+        )
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    print(report)
     return 0
 
 
@@ -653,11 +725,20 @@ def format_answer_evaluation_for_cli(evaluation: AnswerEvaluation) -> str:
         f"Summary: {evaluation.summary}",
     ]
     if evaluation.scores:
-        average = sum(score.score for score in evaluation.scores) / len(evaluation.scores)
+        average = sum(score.effective_score for score in evaluation.scores) / len(evaluation.scores)
         lines.append(f"Средний rubric score: {average:.1f}/5")
         lines.append("Scores:")
         for score in evaluation.scores:
-            lines.append(f"- {score.dimension.title} ({score.dimension.slug}): {score.score}/5")
+            score_label = f"{score.effective_score}/5"
+            if score.manual_override_score is not None:
+                score_label += f" (manual override; original {score.score}/5)"
+            lines.append(f"- {score.dimension.title} ({score.dimension.slug}): {score_label}")
+            if score.manual_override_reason:
+                lines.append(f"  Override reason: {score.manual_override_reason}")
+            if score.manual_override_at:
+                lines.append(
+                    f"  Override at: {score.manual_override_at.isoformat(timespec='seconds')}"
+                )
             lines.append(f"  Evidence: {score.evidence}")
             lines.append(f"  Gaps: {score.gaps}")
             if score.next_drill:

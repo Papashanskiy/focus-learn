@@ -1144,6 +1144,41 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
             finally:
                 app.services.close()
 
+    async def test_tui_repeat_baseline_finish_shows_delta_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_today_baseline_repeat_outcome.db"))
+            self.seed_one_practice_answer(app)
+            previous_session_id = self.seed_completed_baseline_outcome(app, days_ago=8)
+            try:
+                async with app.run_test(size=(120, 36)) as pilot:
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    self.assertIsNotNone(app.session)
+                    session_id = app.session.id or 0
+                    input_bar = app.query_one("#input_bar", TextArea)
+
+                    input_bar.value = "Repeat baseline ответ с более ясным evidence."
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    input_bar.value = "4"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    input_bar.value = "/finish-session"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    outcome = app.services.repository.get_session_outcome_for_session(session_id)
+                    self.assertIsNotNone(outcome)
+                    assert outcome is not None
+                    self.assertIn("Baseline delta comparison:", outcome.summary)
+                    self.assertIn(f"previous session #{previous_session_id}", outcome.summary)
+                    self.assertIn("Baseline delta comparison:", app.question_text())
+                    self.assertIn(f"previous session #{previous_session_id}", app.question_text())
+            finally:
+                app.services.close()
+
     async def test_tui_today_action_buttons_are_visible_and_start_primary_drill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app = InterviewPrepTUI(str(Path(tmp) / "tui_today_actions.db"))

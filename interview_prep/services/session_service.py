@@ -431,7 +431,7 @@ class SessionService:
     def _session_outcome_next_drills(self, evaluations: list[AnswerEvaluation]) -> list[str]:
         drills: list[str] = []
         for evaluation in evaluations:
-            for drill in evaluation.next_drills:
+            for drill in _effective_evaluation_next_drills(evaluation):
                 normalized = drill.strip()
                 if normalized and normalized not in drills:
                     drills.append(normalized)
@@ -507,7 +507,7 @@ def _average(values: Iterable[int | float | None]) -> float | None:
 
 
 def _average_evaluation_score(evaluations: list[AnswerEvaluation]) -> float | None:
-    scores = [score.score for evaluation in evaluations for score in evaluation.scores]
+    scores = [score.effective_score for evaluation in evaluations for score in evaluation.scores]
     return _average(scores)
 
 
@@ -520,7 +520,7 @@ def _dimension_average_scores(evaluations: list[AnswerEvaluation]) -> list[tuple
                 slug,
                 (score.dimension.title, 0.0, 0, score.dimension.order_index),
             )
-            totals[slug] = (title, total + score.score, count + 1, order_index)
+            totals[slug] = (title, total + score.effective_score, count + 1, order_index)
     return [
         (title, total / count)
         for title, total, count, _order_index in sorted(
@@ -529,6 +529,28 @@ def _dimension_average_scores(evaluations: list[AnswerEvaluation]) -> list[tuple
         )
         if count
     ]
+
+
+def _effective_evaluation_next_drills(evaluation: AnswerEvaluation) -> list[str]:
+    drills: list[str] = []
+    low_scores = [
+        score
+        for score in sorted(
+            evaluation.scores,
+            key=lambda item: (item.effective_score, item.dimension.order_index),
+        )
+        if score.effective_score < 4
+    ]
+    for score in low_scores:
+        if not score.next_drill:
+            continue
+        if score.next_drill not in drills:
+            drills.append(score.next_drill)
+    if drills:
+        return drills
+    if low_scores:
+        return evaluation.next_drills
+    return []
 
 
 def build_recheck_feedback_prompt(

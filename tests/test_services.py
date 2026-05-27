@@ -445,6 +445,9 @@ class ServiceTests(unittest.TestCase):
                 "evidence",
                 "gaps",
                 "next_drill",
+                "manual_override_score",
+                "manual_override_reason",
+                "manual_override_at",
             }.issubset(score_columns)
         )
 
@@ -1249,6 +1252,56 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("слабый", evaluation.summary)
         self.assertTrue(evaluation.next_drills)
 
+    def test_evaluation_service_manual_override_keeps_original_score_metadata(self) -> None:
+        repository = make_repository()
+        question = repository.list_questions()[0]
+        session = repository.create_session(
+            Session(
+                id=None,
+                topic_id=question.topic_id,
+                started_at=datetime(2026, 5, 26, 9, 0, 0),
+                ended_at=None,
+                target_minutes=60,
+            )
+        )
+        answer = repository.add_answer(
+            Answer(
+                id=None,
+                session_id=session.id or 0,
+                question_id=question.id or 0,
+                user_answer="Ответ содержит tradeoffs, rollback и observability.",
+                self_score=3,
+                ai_feedback=None,
+                answered_at=datetime(2026, 5, 26, 9, 10, 0),
+            )
+        )
+        service = EvaluationService(repository)
+        evaluation = service.evaluate_and_store_answer(answer, question, use_llm=False)
+        original = evaluation.scores[0]
+        override_score = 5 if original.score != 5 else 4
+        overridden_at = datetime(2026, 5, 26, 9, 30, 0)
+
+        updated = service.override_score(
+            evaluation.id or 0,
+            dimension_slug=original.dimension.slug,
+            score=override_score,
+            reason="AI пропустила конкретный production evidence.",
+            overridden_at=overridden_at,
+        )
+
+        updated_score = next(
+            score for score in updated.scores if score.dimension.slug == original.dimension.slug
+        )
+        self.assertEqual(updated_score.score, original.score)
+        self.assertEqual(updated_score.manual_override_score, override_score)
+        self.assertEqual(updated_score.effective_score, override_score)
+        self.assertEqual(
+            updated_score.manual_override_reason,
+            "AI пропустила конкретный production evidence.",
+        )
+        self.assertEqual(updated_score.manual_override_at, overridden_at)
+        repository.close()
+
     def test_rubric_evaluation_prompt_requires_json_scores_and_evidence(self) -> None:
         repository = make_repository()
         question = repository.list_questions()[0]
@@ -1983,6 +2036,69 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("Planned questions:", marked.summary)
         self.assertTrue(any("baseline practice session" in item for item in marked.strengths))
 
+    def test_calibration_repeat_outcome_compares_delta_to_previous_baseline(self) -> None:
+        repository = make_repository()
+        sessions = SessionService(repository, StaticLLM())
+        calibration = CalibrationService(repository)
+        previous_completed_at = datetime(2026, 5, 1, 10, 0, 0)
+        previous_session = repository.create_session(
+            Session(
+                id=None,
+                topic_id=None,
+                started_at=previous_completed_at - timedelta(minutes=25),
+                ended_at=None,
+                target_minutes=25,
+            )
+        )
+        repository.finish_session(previous_session.id or 0, previous_completed_at)
+        repository.upsert_session_outcome(
+            SessionOutcome(
+                id=None,
+                session_id=previous_session.id or 0,
+                summary="Baseline calibration. Previous baseline.",
+                strengths=[],
+                gaps=[],
+                next_drills=[],
+                readiness_delta=0.02,
+                created_at=previous_completed_at,
+                outcome_type=SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE,
+            )
+        )
+
+        plan = calibration.start_baseline_session(target_minutes=25)
+        first_question = plan.picks[0].question
+        sessions.answer_question(
+            plan.session.id or 0,
+            first_question.id or 0,
+            "Repeat baseline answer with clearer evidence.",
+            4,
+            with_feedback=False,
+        )
+        sessions.finish_session(plan.session.id or 0)
+
+        comparison = calibration.baseline_delta_comparison(plan.session.id or 0)
+        marked = calibration.mark_baseline_session_outcome(
+            plan.session.id or 0,
+            planned_questions=len(plan.picks),
+        )
+
+        self.assertIsNotNone(comparison)
+        assert comparison is not None
+        self.assertEqual(comparison.previous_session_id, previous_session.id)
+        self.assertEqual(comparison.previous_readiness_delta, 0.02)
+        self.assertEqual(comparison.current_readiness_delta, 0.10)
+        self.assertEqual(comparison.delta_change, 0.08)
+        self.assertIsNotNone(marked)
+        assert marked is not None
+        self.assertIn("Baseline delta comparison:", marked.summary)
+        self.assertIn(f"previous session #{previous_session.id}", marked.summary)
+        self.assertIn("change +0.08", marked.summary)
+        self.assertTrue(any("delta comparison" in item for item in marked.strengths))
+        self.assertEqual(
+            calibration.baseline_delta_comparison(plan.session.id or 0),
+            comparison,
+        )
+
     def test_finish_abandoned_empty_session_does_not_generate_session_outcome(self) -> None:
         repository = make_repository()
         sessions = SessionService(repository, StaticLLM())
@@ -2370,6 +2486,107 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("readiness_reasons", aggregate.to_dict())
         self.assertEqual(snapshot.to_dict()["evaluated_competency_count"], snapshot.evaluated_competency_count)
         self.assertEqual(aggregate.to_dict()["competency"]["slug"], "readiness-custom")
+
+    def test_readiness_uses_manual_override_scores_while_preserving_original_audit(
+        self,
+    ) -> None:
+        repository = make_repository()
+        readiness = ReadinessService(repository)
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        topic = repository.find_topic_by_slug("python-runtime")
+        self.assertIsNotNone(topic)
+        assert topic is not None
+        competency = repository.upsert_competency(
+            Competency(
+                id=None,
+                slug="readiness-override-audit",
+                title="Readiness Override Audit",
+                description="Synthetic competency for manual override readiness tests.",
+                category="readiness",
+                level="senior",
+                order_index=1001,
+            )
+        )
+        question = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt="Как проверить manual override readiness?",
+                hint="Ответ должен дать enough evidence для rubric readiness.",
+                reference_answer="Нужны tradeoffs, failure modes, production details и evidence.",
+                source="test",
+            )
+        )
+        repository.set_question_competencies(
+            question.id or 0,
+            [QuestionCompetencyLink(competency=competency, is_primary=True)],
+        )
+        session = repository.create_session(
+            Session(
+                id=None,
+                topic_id=topic.id,
+                started_at=now - timedelta(minutes=30),
+                ended_at=None,
+                target_minutes=60,
+            )
+        )
+        answer = repository.add_answer(
+            Answer(
+                id=None,
+                session_id=session.id or 0,
+                question_id=question.id or 0,
+                user_answer="не знаю",
+                self_score=2,
+                ai_feedback=None,
+                answered_at=now - timedelta(minutes=20),
+            )
+        )
+        repository.finish_session(session.id or 0, now - timedelta(minutes=5))
+        evaluation_service = EvaluationService(repository)
+        evaluation = evaluation_service.evaluate_and_store_answer(answer, question, use_llm=False)
+        original_scores = {score.dimension.slug: score.score for score in evaluation.scores}
+
+        before = next(
+            item
+            for item in readiness.snapshot(now=now).competencies
+            if item.competency.slug == "readiness-override-audit"
+        )
+        self.assertLess(before.avg_rubric_score or 0, 3.5)
+        self.assertTrue(
+            any(reason.startswith("низкая rubric оценка:") for reason in before.readiness_reasons)
+        )
+
+        for score in evaluation.scores:
+            evaluation_service.override_score(
+                evaluation.id or 0,
+                dimension_slug=score.dimension.slug,
+                score=5,
+                reason="Manual audit correction for readiness.",
+                overridden_at=now,
+            )
+
+        after = next(
+            item
+            for item in readiness.snapshot(now=now).competencies
+            if item.competency.slug == "readiness-override-audit"
+        )
+        updated = repository.get_answer_evaluation(evaluation.id or 0)
+        self.assertIsNotNone(updated)
+        assert updated is not None
+
+        self.assertAlmostEqual(after.avg_rubric_score or 0, 5.0)
+        self.assertGreater(after.readiness_score, before.readiness_score)
+        self.assertFalse(
+            any(reason.startswith("низкая rubric оценка:") for reason in after.readiness_reasons)
+        )
+        for score in updated.scores:
+            self.assertEqual(score.score, original_scores[score.dimension.slug])
+            self.assertEqual(score.manual_override_score, 5)
+            self.assertEqual(score.effective_score, 5)
+            self.assertEqual(score.manual_override_reason, "Manual audit correction for readiness.")
+            self.assertEqual(score.manual_override_at, now)
+        repository.close()
 
     def test_readiness_service_scores_competencies_with_gap_reasons(self) -> None:
         repository = make_repository()

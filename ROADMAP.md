@@ -23,11 +23,12 @@
 - Основной Ollama runtime по умолчанию переключен на локальную модель `gemma4:e4b`; config/env overrides и fallback при недоступности модели сохранены.
 - Продукт уже начал измерять подготовку через senior competencies и evidence: taxonomy зафиксирована, добавлена domain-модель, базовая SQLite-таблица/seed competencies, repository API, таблица связи `question_competencies`, repository-методы чтения/перезаписи привязок вопросов и seed links для bootstrap-вопросов, CLI `questions` и TUI practice header показывают competencies вопроса. Rubric dimensions для senior answers зафиксированы как contract; отдельные system design rubric dimensions сохранены и после `/sd-feedback` transcript/artifacts оцениваются deterministic rubric evaluation с сохранением scores; TUI system design screen заранее показывает пустые requirements/API/data/risks sections перед итоговым feedback, `/sd-checkpoint` дает короткую промежуточную interviewer-проверку без final feedback artifact/evaluation, `/sd-pressure` задает targeted pressure follow-up по senior failure modes, а `/history system-design` показывает сохраненный final feedback и rubric scores; structured evaluation service умеет strict LLM JSON и fallback heuristic при недоступной Ollama/невалидном JSON, practice flow сохраняет evaluation, TUI review показывает rubric scores после self-score, а `ReadinessService` считает per-competency readiness score и общий evidence-based readiness summary без абсолютной оценки кандидата; CLI `stats` показывает `Senior readiness` и top gaps, а TUI `/readiness` показывает focused dashboard по competencies, score, evidence count и next action.
 - Read-only facade теперь отдает JSON-safe список competencies, competency links вопросов и web endpoints `/api/readiness`/`/api/competencies`/`/api/sessions/<id>`/`/api/notebook` для будущих dashboard/API слоев без замены TUI.
-- CLI `evaluations --answer <id>` показывает сохраненную structured rubric evaluation по ответу: summary, source, average score, per-dimension evidence/gaps и next drills.
+- CLI `evaluations --answer <id>` показывает сохраненную structured rubric evaluation по ответу: summary, source, average score, per-dimension evidence/gaps и next drills. Manual override rubric score сохраняет original AI score для аудита и используется как effective score в readiness, session outcome и interview report surfaces.
 - AI feedback prompt уже ужесточен против приписывания кандидату лишних пунктов; есть weak-answer eval cases, unit prompt guard и service-level suspicious flag для praise без evidence из candidate answer. `feedback_quality_flags` сохраняются в payload последней structured evaluation, TUI review показывает предупреждение, если feedback помечен как fallback или suspicious, `/recheck-feedback` повторно запрашивает feedback для последнего ответа с более строгим prompt, а regression-тест фиксирует низкие rubric scores для ответа "не знаю" и suspicious-flag для reference-only praise.
 - Сессии уже сохраняются и видны в history; базовый статус `in_progress`/`completed`/`abandoned` хранится в SQLite с legacy-backfill, а session outcome уже имеет domain-модель, SQLite/repository storage foundation, deterministic generation после answered practice session и показывается на TUI ended screen после `/quit` или истечения target time, через `/finish-session` без выхода из TUI, в `/history <session-id>` и через CLI `session-summary <id>`.
-- Calibration baseline уже умеет выбирать до 5 accepted questions по разным competencies и запускать из Today empty-state mixed practice session, которая идет по выбранному service-level плану; outcome сохраняется с типом `calibration_baseline`, чтобы readiness/trend отличал первичную оценку от обычной practice. Mock senior interview запускается без ручного выбора topic из Today/readiness, смешивает coding/theory/system design/debugging и показывает section progress в practice review flow.
+- Calibration baseline уже умеет выбирать до 5 accepted questions по разным competencies и запускать из Today empty-state mixed practice session, которая идет по выбранному service-level плану; outcome сохраняется с типом `calibration_baseline`, чтобы readiness/trend отличал первичную оценку от обычной practice. Repeat baseline через 7 дней показывается как Today/readiness action и после завершения сохраняет сравнение readiness delta с предыдущей baseline. Mock senior interview запускается без ручного выбора topic из Today/readiness, смешивает coding/theory/system design/debugging и показывает section progress в practice review flow.
 - Readiness snapshot теперь включает `must_fix_drill` для top gaps, а CLI `stats` и TUI `/readiness` показывают список `Must fix before interview` с конкретными drills перед интервью.
+- CLI `interview-report` экспортирует Markdown-отчет перед интервью по latest или выбранной completed practice session: readiness signal, strengths/gaps, evidence answers и next plan.
 - CLI `curriculum-status` показывает read-only покрытие generated curriculum: counts curriculum topics/subtopics/objectives/questions и пустые зоны bootstrap/fallback.
 - Generated content уже появляется в приложении; для generated questions добавлен первый quality gate против очевидных дублей внутри темы, storage foundation source_quality/status (`pending_review`/`accepted`/`archived`), CLI `questions-review` и TUI `/questions-review` для pending review/accept/archive. Background question generation уже просит LLM вернуть tag/competency slugs и безопасно привязывает tags/known competencies к новым вопросам; generated materials/scenarios можно архивировать с optional reason; еще нет оценки полезности generated artifacts.
 - TUI refactor уже выделил pure render helpers, practice/learning/system-design controllers и content worker orchestration; дальнейшие TUI-фичи должны сохранять этот контракт и не возвращать state transitions обратно в монолитный `ui/tui.py`.
@@ -52,6 +53,10 @@
 
 ## Done
 
+- [x] Calibration: regression-тест подтверждает, что manual override влияет на readiness и сохраняет original AI score для аудита.
+- [x] Calibration: manual override rubric score учитывается как effective score в readiness/session outcome/report surfaces.
+- [x] Calibration: CLI `interview-report` экспортирует Markdown-отчет со strengths, gaps, evidence answers и next plan.
+- [x] Calibration: repeat baseline outcome сравнивает текущий readiness delta с предыдущей completed baseline и показывает summary в session outcome.
 - [x] Calibration: service-level repeat baseline status определяет последнюю completed baseline, 7-day due date и последний readiness delta.
 - [x] Calibration: readiness показывает "must fix before interview" список из top gaps с конкретными drills.
 - [x] Mock interview progress: TUI practice review показывает текущую section и remaining sections для mixed mock senior interview.
@@ -566,13 +571,15 @@
   - [x] Mock interview TUI: добавить Today/readiness action для старта mock senior interview без ручного выбора topic.
   - [x] Mock interview progress: показывать текущую section и remaining sections в practice review flow.
 - [x] Calibration: добавить "must fix before interview" список из top gaps с конкретными drills.
-- [ ] Calibration: добавить повторную baseline session через 7 дней и сравнение readiness delta.
+- [x] Calibration: добавить повторную baseline session через 7 дней и сравнение readiness delta.
   - [x] Baseline repeat status: service-level статус определяет последнюю completed baseline, due date через 7 дней и последний readiness delta.
   - [x] Baseline repeat action: Today/readiness показывает повторную baseline session как action, когда статус due.
-  - [ ] Baseline delta comparison: после repeat baseline сравнивать readiness delta с предыдущей baseline и показывать summary.
-- [ ] Calibration: добавить export `interview-report` в Markdown: strengths, gaps, evidence answers, next plan.
-- [ ] Calibration: добавить manual override для rubric score, чтобы пользователь мог исправить ошибочную AI-оценку.
-- [ ] Calibration: добавить tests, что manual override влияет на readiness, но сохраняет original AI score для аудита.
+  - [x] Baseline delta comparison: после repeat baseline сравнивать readiness delta с предыдущей baseline и показывать summary.
+- [x] Calibration: добавить export `interview-report` в Markdown: strengths, gaps, evidence answers, next plan.
+- [x] Calibration: добавить manual override для rubric score, чтобы пользователь мог исправить ошибочную AI-оценку.
+  - [x] Manual override foundation: добавить audit-поля, service/repository update и CLI `evaluation-override` для одной rubric dimension.
+  - [x] Manual override readiness: учитывать effective override score в readiness/session outcome/report surfaces.
+- [x] Calibration: добавить tests, что manual override влияет на readiness, но сохраняет original AI score для аудита.
 
 ## Known limitations
 

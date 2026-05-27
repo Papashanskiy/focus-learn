@@ -57,6 +57,15 @@ class BaselineRepeatStatus:
 
 
 @dataclass(frozen=True)
+class BaselineDeltaComparison:
+    previous_session_id: int
+    previous_readiness_delta: float
+    current_readiness_delta: float
+    delta_change: float
+    summary: str
+
+
+@dataclass(frozen=True)
 class MockSeniorInterviewPick:
     section: str
     competency: Competency
@@ -142,23 +151,81 @@ class CalibrationService:
         summary = outcome.summary
         if not summary.startswith("Baseline calibration."):
             summary = f"Baseline calibration. Planned questions: {planned_questions}. {summary}"
+        comparison = self.baseline_delta_comparison(session_id)
+        has_comparison_summary = "Baseline delta comparison:" in summary
+        if comparison is not None and not has_comparison_summary:
+            summary = f"{summary} {comparison.summary}"
         strengths = list(outcome.strengths)
-        marker = "Первичная baseline practice session сохранена как calibration signal."
+        marker = (
+            "Повторная baseline practice session сохранена с delta comparison."
+            if comparison is not None or has_comparison_summary
+            else "Первичная baseline practice session сохранена как calibration signal."
+        )
         if marker not in strengths:
             strengths.insert(0, marker)
+        gaps = list(outcome.gaps)
+        if comparison is not None and comparison.delta_change < 0:
+            gap = (
+                f"Baseline readiness delta снизилась на {abs(comparison.delta_change):.2f} "
+                f"относительно session #{comparison.previous_session_id}."
+            )
+            if gap not in gaps:
+                gaps.insert(0, gap)
         return self.repository.upsert_session_outcome(
             SessionOutcome(
                 id=outcome.id,
                 session_id=outcome.session_id,
                 summary=summary,
                 strengths=strengths,
-                gaps=outcome.gaps,
+                gaps=gaps,
                 next_drills=outcome.next_drills,
                 readiness_delta=outcome.readiness_delta,
                 created_at=outcome.created_at,
                 outcome_type=SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE,
             )
         )
+
+    def baseline_delta_comparison(self, session_id: int) -> BaselineDeltaComparison | None:
+        outcome = self.repository.get_session_outcome_for_session(session_id)
+        if outcome is None:
+            return None
+        previous = self._previous_completed_baseline_outcome(session_id)
+        if previous is None:
+            return None
+
+        previous_delta = float(previous["readiness_delta"])
+        current_delta = outcome.readiness_delta
+        delta_change = round(current_delta - previous_delta, 2)
+        direction = "improved" if delta_change > 0 else "regressed" if delta_change < 0 else "unchanged"
+        summary = (
+            "Baseline delta comparison: "
+            f"current {current_delta:+.2f} vs previous session #{int(previous['session_id'])} "
+            f"{previous_delta:+.2f}; change {delta_change:+.2f} ({direction})."
+        )
+        return BaselineDeltaComparison(
+            previous_session_id=int(previous["session_id"]),
+            previous_readiness_delta=previous_delta,
+            current_readiness_delta=current_delta,
+            delta_change=delta_change,
+            summary=summary,
+        )
+
+    def _previous_completed_baseline_outcome(self, session_id: int) -> dict | None:
+        current_session = self.repository.get_session(session_id)
+        if current_session is None or current_session.ended_at is None:
+            return None
+
+        previous: dict | None = None
+        for row in self.repository.list_completed_session_outcomes_for_readiness_trend():
+            if str(row.get("outcome_type")) != SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE:
+                continue
+            row_session_id = int(row["session_id"])
+            if row_session_id == session_id:
+                continue
+            ended_at = datetime.fromisoformat(str(row["ended_at"]))
+            if (ended_at, row_session_id) < (current_session.ended_at, session_id):
+                previous = row
+        return previous
 
     def baseline_repeat_status(
         self,
