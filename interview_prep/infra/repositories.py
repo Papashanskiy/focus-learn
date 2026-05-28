@@ -43,12 +43,98 @@ from interview_prep.domain.models import (
 )
 from interview_prep.infra.seed import (
     BOOTSTRAP_TOPICS,
+    CANONICAL_2026_SOURCE,
     RUBRIC_DIMENSIONS,
     SENIOR_COMPETENCIES,
     SeedQuestion,
     SEED_QUESTIONS,
     SYSTEM_DESIGN_RUBRIC_DIMENSIONS,
 )
+
+
+CANONICAL_METADATA_TAGS = {
+    "api": Tag(
+        id=None,
+        slug="api",
+        title="API",
+        description="Canonical API and web backend interview coverage.",
+        source=CANONICAL_2026_SOURCE,
+    ),
+    "async": Tag(
+        id=None,
+        slug="async",
+        title="Async",
+        description="Canonical async worker, queue and concurrency interview coverage.",
+        source=CANONICAL_2026_SOURCE,
+    ),
+    "coding": Tag(
+        id=None,
+        slug="coding",
+        title="Coding",
+        description="Canonical coding screen interview coverage.",
+        source=CANONICAL_2026_SOURCE,
+    ),
+    "db": Tag(
+        id=None,
+        slug="db",
+        title="Database",
+        description="Canonical database and Postgres interview coverage.",
+        source=CANONICAL_2026_SOURCE,
+    ),
+    "frequency-high": Tag(
+        id=None,
+        slug="frequency-high",
+        title="High frequency",
+        description="High-frequency interview signal from canonical source research.",
+        source=CANONICAL_2026_SOURCE,
+    ),
+    "must-know": Tag(
+        id=None,
+        slug="must-know",
+        title="Must know",
+        description="Canonical must-know interview question.",
+        source=CANONICAL_2026_SOURCE,
+    ),
+    "ops": Tag(
+        id=None,
+        slug="ops",
+        title="Ops",
+        description="Canonical operations, reliability and incident interview coverage.",
+        source=CANONICAL_2026_SOURCE,
+    ),
+    "python-core": Tag(
+        id=None,
+        slug="python-core",
+        title="Python core",
+        description="Canonical Python runtime and language internals interview coverage.",
+        source=CANONICAL_2026_SOURCE,
+    ),
+    "system-design": Tag(
+        id=None,
+        slug="system-design",
+        title="System design",
+        description="Canonical system design interview coverage.",
+        source=CANONICAL_2026_SOURCE,
+    ),
+    "testing": Tag(
+        id=None,
+        slug="testing",
+        title="Testing",
+        description="Canonical testing and quality interview coverage.",
+        source=CANONICAL_2026_SOURCE,
+    ),
+}
+
+CANONICAL_CATEGORY_TAGS = {
+    "api-web": "api",
+    "async-queues": "async",
+    "coding-screen": "coding",
+    "ops-reliability": "ops",
+    "python-core": "python-core",
+    "sql-postgres": "db",
+    "system-design": "system-design",
+    "testing-quality": "testing",
+}
 
 
 def _dt(value: str) -> datetime:
@@ -570,6 +656,7 @@ class SQLiteRepository:
             for question in SEED_QUESTIONS:
                 self._upsert_seed_question(question, topic_ids)
             self._seed_question_competencies(SEED_QUESTIONS, topic_ids, competency_ids)
+            self._seed_question_tags(SEED_QUESTIONS, topic_ids)
 
     def _upsert_seed_question(self, question: SeedQuestion, topic_ids: dict[str, int]) -> int:
         topic_id = topic_ids.get(question.topic_slug)
@@ -700,6 +787,61 @@ class SQLiteRepository:
                     """,
                     (question_id, competency_id, 1 if link.is_primary else 0, link.weight),
                 )
+
+    def _seed_question_tags(
+        self,
+        questions: Sequence[SeedQuestion],
+        topic_ids: dict[str, int],
+    ) -> None:
+        for tag in CANONICAL_METADATA_TAGS.values():
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO tags (slug, title, description, source)
+                VALUES (?, ?, ?, ?)
+                """,
+                (tag.slug, tag.title, tag.description, tag.source),
+            )
+
+        tag_ids = {
+            row["slug"]: row["id"]
+            for row in self.connection.execute("SELECT id, slug FROM tags")
+            if row["slug"] in CANONICAL_METADATA_TAGS
+        }
+
+        for question in questions:
+            metadata_tag_slugs = self._canonical_metadata_tag_slugs(question)
+            if not metadata_tag_slugs:
+                continue
+            topic_id = topic_ids.get(question.topic_slug)
+            if topic_id is None:
+                raise RuntimeError(f"Unknown seed topic slug: {question.topic_slug}")
+            question_id = self._find_seed_question_id(question, topic_id)
+            if question_id is None:
+                continue
+            for slug in metadata_tag_slugs:
+                tag_id = tag_ids.get(slug)
+                if tag_id is None:
+                    raise RuntimeError(f"Unknown seed tag slug: {slug}")
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO question_tags (question_id, tag_id)
+                    VALUES (?, ?)
+                    """,
+                    (question_id, tag_id),
+                )
+
+    def _canonical_metadata_tag_slugs(self, question: SeedQuestion) -> list[str]:
+        if question.source != CANONICAL_2026_SOURCE:
+            return []
+        slugs: list[str] = []
+        if "must-know" in question.source_category_hints:
+            slugs.append("must-know")
+        if question.source_frequency_hint == "high":
+            slugs.append("frequency-high")
+        for category_hint, tag_slug in CANONICAL_CATEGORY_TAGS.items():
+            if category_hint in question.source_category_hints:
+                slugs.append(tag_slug)
+        return list(dict.fromkeys(slugs))
 
     def list_topics(self) -> list[Topic]:
         rows = self.connection.execute(

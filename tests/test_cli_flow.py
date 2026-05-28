@@ -20,6 +20,7 @@ from interview_prep.domain.models import (
     QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
     QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
     Question,
+    QuestionAutoCurationAudit,
     QuestionCompetencyLink,
     Session,
     SessionOutcome,
@@ -446,11 +447,37 @@ class CLIFlowTests(unittest.TestCase):
                     id=None,
                     topic_id=topic.id or 0,
                     difficulty="senior",
-                    prompt="Как review-ить generated вопрос перед practice loop?",
+                    prompt="Какие tradeoffs проверить в generated вопросе перед practice loop?",
                     hint="Проверь uniqueness, senior coverage и production realism.",
                     reference_answer="Нужно принять полезные вопросы и архивировать слабые.",
                     source="background-llm",
                     source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+                    source_url="https://example.com/interview-notes",
+                    source_retrieved_at=datetime(2026, 5, 28, 10, 30),
+                    source_category_hints=("async", "queues"),
+                    source_frequency_hint="high",
+                )
+            )
+            assert pending.id is not None
+            repository.add_question_auto_curation_audit(
+                QuestionAutoCurationAudit(
+                    id=None,
+                    question_id=pending.id,
+                    previous_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                    decision="quarantined",
+                    resulting_status=QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+                    confidence=0.72,
+                    rationale="Нужна ручная проверка senior-specific constraints.",
+                    quality_flags=["needs_audit"],
+                    curator_model="deterministic",
+                    curator_version="source-backed-auto-curation-v1",
+                    source_url="https://example.com/interview-notes",
+                    source_retrieved_at=datetime(2026, 5, 28, 10, 30),
+                    source_category_hints=["async", "queues"],
+                    source_frequency_hint="high",
+                    created_at=datetime(2026, 5, 28, 10, 45),
+                    curator_score=3,
+                    curator_source_evidence="Source mentions async queue incident reviews.",
                 )
             )
             accepted = repository.add_question(
@@ -483,10 +510,27 @@ class CLIFlowTests(unittest.TestCase):
             )
 
         self.assertEqual(process.returncode, 0, process.stderr)
-        self.assertIn("Pending generated questions: 1", process.stdout)
+        self.assertIn("Generated question audit queue: 1", process.stdout)
+        self.assertIn(
+            "Auto-curation is the happy path; use this list only for pending_review audit exceptions.",
+            process.stdout,
+        )
         self.assertIn(f"#{pending.id} Async backend", process.stdout)
         self.assertIn("Source: background-llm", process.stdout)
-        self.assertIn("Как review-ить generated вопрос", process.stdout)
+        self.assertIn("Source metadata: url=https://example.com/interview-notes retrieved_at=2026-05-28T10:30:00", process.stdout)
+        self.assertIn("Category hints: async, queues", process.stdout)
+        self.assertIn("Frequency hint: high", process.stdout)
+        self.assertIn("Quality flags: generic", process.stdout)
+        self.assertIn("Latest auto-curation audit:", process.stdout)
+        self.assertIn("Curator rationale: Нужна ручная проверка senior-specific constraints.", process.stdout)
+        self.assertIn("Source evidence: Source mentions async queue incident reviews.", process.stdout)
+        self.assertIn(
+            f"Undo hint: questions-source undo --question {pending.id} restores pending_auto_review "
+            "if current status is still pending_review",
+            process.stdout,
+        )
+        self.assertIn("Какие tradeoffs проверить", process.stdout)
+        self.assertIn("Audit actions: questions-review accept <id> вручную принимает exception", process.stdout)
         self.assertNotIn(f"#{accepted.id}", process.stdout)
 
     def test_questions_review_accepts_and_archives_pending_questions(self) -> None:
@@ -565,8 +609,10 @@ class CLIFlowTests(unittest.TestCase):
             repository.close()
 
         self.assertEqual(accept_process.returncode, 0, accept_process.stderr)
+        self.assertIn("Manual audit override:", accept_process.stdout)
         self.assertIn(f"Question #{first.id} accepted.", accept_process.stdout)
         self.assertEqual(archive_process.returncode, 0, archive_process.stderr)
+        self.assertIn("Manual audit override:", archive_process.stdout)
         self.assertIn(f"Question #{second.id} archived.", archive_process.stdout)
         self.assertIsNotNone(accepted)
         self.assertIsNotNone(archived)

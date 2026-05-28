@@ -9,6 +9,7 @@ from interview_prep.domain.models import (
 )
 from interview_prep.infra.repositories import SQLiteRepository
 from interview_prep.services.content_generation_service import question_prompts_are_similar
+from interview_prep.services.question_quality_rules import generic_prompt_detail
 
 
 QUESTION_AUDIT_KIND_DUPLICATE = "duplicate"
@@ -16,18 +17,6 @@ QUESTION_AUDIT_KIND_GENERIC = "generic"
 QUESTION_AUDIT_KIND_TOO_LONG = "too-long"
 DEFAULT_MAX_QUESTION_PROMPT_CHARS = 280
 GENERATED_QUESTION_SOURCES = frozenset({"background-llm", "llm-seed"})
-
-GENERIC_PROMPT_PHRASES = (
-    ("ключевой production-риск", "generic production risk wording"),
-    ("production-риск", "generic production risk wording"),
-    ("backend flow", "generic backend flow wording"),
-    ("backend-flow", "generic backend flow wording"),
-    ("какие tradeoffs", "generic tradeoffs wording"),
-    ("одну важную механику", "generic runtime mechanism wording"),
-    ("database problem", "generic database problem wording"),
-    ("основные design dimensions", "generic system design dimensions wording"),
-)
-
 
 @dataclass(frozen=True)
 class QuestionQualityFinding:
@@ -128,14 +117,6 @@ class QuestionQualityAuditService:
             )
             seen_question_ids.add(question_id)
         return QuestionQualityCleanupResult(archived_questions=tuple(archived))
-
-
-def generic_prompt_detail(prompt: str) -> str | None:
-    normalized = prompt.casefold().replace("ё", "е")
-    for phrase, detail in GENERIC_PROMPT_PHRASES:
-        if phrase in normalized:
-            return detail
-    return None
 
 
 def is_accepted_generic_generated_finding(finding: QuestionQualityFinding) -> bool:

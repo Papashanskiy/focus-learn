@@ -14,6 +14,7 @@ from interview_prep.domain.models import (
 )
 from interview_prep.domain.rules import DEFAULT_SESSION_MINUTES
 from interview_prep.infra.repositories import SQLiteRepository
+from interview_prep.services.question_selection import canonical_must_know_rank
 
 
 DEFAULT_BASELINE_QUESTION_COUNT = 5
@@ -428,6 +429,7 @@ class CalibrationService:
         return (
             0 if link.is_primary else 1,
             int(question_metrics.get("answers") or 0),
+            canonical_must_know_rank(question),
             question.topic_id,
             question.difficulty,
             question.id or 0,

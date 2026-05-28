@@ -35,6 +35,7 @@ from interview_prep.services.question_quality_audit_service import (
     DEFAULT_MAX_QUESTION_PROMPT_CHARS,
     QuestionQualityFinding,
 )
+from interview_prep.services.question_quality_rules import generated_question_quality_flags
 from interview_prep.services.question_auto_curation_service import (
     QuestionAutoCurationDecision,
     QuestionAutoCurationUndoResult,
@@ -79,7 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
     questions_review_parser = subparsers.add_parser(
         "questions-review",
         parents=[shared_parent],
-        help="Проверить pending generated questions и принять или архивировать их",
+        help=(
+            "Audit pending generated questions; auto-curation is the primary flow, "
+            "accept/archive are manual overrides"
+        ),
     )
     questions_review_parser.add_argument("--topic", type=int, help="ID темы для списка pending questions")
     questions_review_parser.add_argument("--limit", type=int, default=20, help="Сколько pending questions показать")
@@ -375,16 +379,21 @@ def cmd_questions_review(args: argparse.Namespace, services: AppServices) -> int
     if args.limit > 0:
         questions = questions[: args.limit]
     if not questions:
-        print("Pending generated questions не найдены.")
+        print("Manual audit queue empty: pending generated questions не найдены.")
         return 0
 
     topic_label = f" для topic #{args.topic}" if args.topic is not None else ""
-    print(f"Pending generated questions{topic_label}: {len(questions)}")
+    print(f"Generated question audit queue{topic_label}: {len(questions)}")
+    print("Auto-curation is the happy path; use this list only for pending_review audit exceptions.")
     topics = {topic.id: topic.title for topic in services.questions.list_topics()}
     for question in questions:
         print()
-        print(format_review_question_for_cli(question, topics.get(question.topic_id, "Неизвестная тема")))
-    print("\nДействия: questions-review accept <id> или questions-review archive <id>.")
+        latest_audit = latest_question_auto_curation_audit(services, question.id)
+        print(format_review_question_for_cli(question, topics.get(question.topic_id, "Неизвестная тема"), latest_audit))
+    print(
+        "\nAudit actions: questions-review accept <id> вручную принимает exception; "
+        "questions-review archive <id> вручную архивирует exception."
+    )
     return 0
 
 
@@ -398,21 +407,74 @@ def update_review_question_status(question_id: int, action: str, services: AppSe
         print(str(error), file=sys.stderr)
         return 1
 
-    print(f"Question #{question.id} {question.source_quality_status}.")
+    print(f"Manual audit override: Question #{question.id} {question.source_quality_status}.")
     return 0
 
 
-def format_review_question_for_cli(question: Question, topic_title: str) -> str:
-    return "\n".join(
+def latest_question_auto_curation_audit(
+    services: AppServices,
+    question_id: int | None,
+) -> QuestionAutoCurationAudit | None:
+    if question_id is None:
+        return None
+    audits = services.repository.list_question_auto_curation_audits(question_id=question_id, limit=1)
+    return audits[0] if audits else None
+
+
+def format_review_question_for_cli(
+    question: Question,
+    topic_title: str,
+    latest_audit: QuestionAutoCurationAudit | None = None,
+) -> str:
+    source_retrieved_at = (
+        question.source_retrieved_at.isoformat(timespec="seconds") if question.source_retrieved_at else "-"
+    )
+    category_hints = ", ".join(question.source_category_hints) or "-"
+    quality_flags = ", ".join(generated_question_quality_flags(question.prompt)) or "-"
+    lines = [
+        f"#{question.id} {topic_title} [{question.difficulty}]",
+        f"Source: {question.source}",
+        f"Status: {question.source_quality_status}",
+        f"Source metadata: url={question.source_url or '-'} retrieved_at={source_retrieved_at}",
+        f"Category hints: {category_hints}",
+        f"Frequency hint: {question.source_frequency_hint or '-'}",
+        f"Quality flags: {quality_flags}",
+    ]
+    if latest_audit is not None:
+        lines.extend(format_review_question_audit_context_for_cli(question, latest_audit))
+    lines.extend(
         [
-            f"#{question.id} {topic_title} [{question.difficulty}]",
-            f"Source: {question.source}",
-            f"Status: {question.source_quality_status}",
             f"Prompt: {question.prompt}",
             f"Hint: {question.hint}",
             f"Reference: {question.reference_answer}",
         ]
     )
+    return "\n".join(lines)
+
+
+def format_review_question_audit_context_for_cli(
+    question: Question,
+    audit: QuestionAutoCurationAudit,
+) -> list[str]:
+    source_evidence = audit.curator_source_evidence or "-"
+    undo_hint = (
+        f"questions-source undo --question {question.id} restores {audit.previous_status} "
+        f"if current status is still {audit.resulting_status}"
+    )
+    if question.source_quality_status != audit.resulting_status:
+        undo_hint = (
+            f"inspect first: latest audit expected current={audit.resulting_status}, "
+            f"actual={question.source_quality_status}"
+        )
+    return [
+        (
+            f"Latest auto-curation audit: #{audit.id or '-'} decision={audit.decision} "
+            f"confidence={audit.confidence:.2f}"
+        ),
+        f"Curator rationale: {audit.rationale}",
+        f"Source evidence: {source_evidence}",
+        f"Undo hint: {undo_hint}",
+    ]
 
 
 def cmd_questions_audit(args: argparse.Namespace, services: AppServices) -> int:

@@ -43,6 +43,7 @@ from interview_prep.services.content_generation_service import (
     JOB_KIND_SYSTEM_DESIGN_SCENARIO,
 )
 from interview_prep.services.curriculum_service import TopicRecommendation
+from interview_prep.services.question_quality_rules import generated_question_quality_flags
 from interview_prep.services.session_service import FeedbackQuality
 from interview_prep.services.system_design_service import DEFAULT_SYSTEM_DESIGN_SCENARIO
 from interview_prep.ui.content_worker_controller import ContentWorkerOrchestrator
@@ -517,8 +518,8 @@ class InterviewPrepTUI(App[None]):
             return
         if self.mode == "questions_review":
             self.add_history(
-                "Questions review read-only. Используй /questions-review accept <id>, "
-                "/questions-review archive <id> или /practice."
+                "Questions audit queue. Auto-curation is primary; "
+                "/questions-review accept <id> and archive <id> are manual audit overrides."
             )
             self.render_all()
             return
@@ -1106,7 +1107,7 @@ class InterviewPrepTUI(App[None]):
 
     def enter_questions_review(self) -> None:
         self.open_questions_review_screen()
-        self.add_history("Открыт review generated questions.")
+        self.add_history("Открыта audit queue для pending generated questions.")
         self.render_all()
 
     def open_questions_review_screen(self) -> None:
@@ -1114,7 +1115,7 @@ class InterviewPrepTUI(App[None]):
             self.questions_review_return_mode = self.mode
         self.mode = "questions_review"
         self.command_palette_visible = False
-        self.last_feedback = "Review pending generated questions перед practice loop."
+        self.last_feedback = "Auto-curation is primary; pending generated questions are audit exceptions."
 
     def exit_questions_review(self) -> None:
         if self.mode != "questions_review":
@@ -1376,7 +1377,7 @@ class InterviewPrepTUI(App[None]):
         if len(parts) != 2 or parts[0] not in {"accept", "archive"}:
             self.add_history(
                 "Использование: /questions-review, /questions-review accept <id> "
-                "или /questions-review archive <id>."
+                "или /questions-review archive <id> как manual audit override."
             )
             self.render_all()
             return
@@ -1397,7 +1398,7 @@ class InterviewPrepTUI(App[None]):
             self.add_history(str(exc))
             self.render_all()
             return
-        self.add_history(f"Question #{question.id} {question.source_quality_status}.")
+        self.add_history(f"Manual audit override: Question #{question.id} {question.source_quality_status}.")
         self.render_all()
 
     def enter_artifacts(self, filter_arg: str | None = None) -> None:
@@ -4478,15 +4479,15 @@ class InterviewPrepTUI(App[None]):
         questions = self.services.questions.list_pending_review_questions()
         topics = {topic.id: topic.title for topic in self.services.questions.list_topics()}
         lines = [
-            "[bold cyan]Generated questions review[/bold cyan]",
+            "[bold cyan]Generated question audit queue[/bold cyan]",
             "",
-            "Read-only список generated questions со статусом pending_review.",
-            "Accept переводит вопрос в accepted, archive переводит вопрос в archived без удаления строки.",
+            "Automated curation is the happy path; this screen shows pending_review exceptions for audit.",
+            "Manual accept/archive are audit overrides and never delete the question row.",
             "",
             "[bold]Команды[/bold]",
             "/questions-review - обновить список.",
-            "/questions-review accept <id> - принять generated question.",
-            "/questions-review archive <id> - архивировать generated question.",
+            "/questions-review accept <id> - manual approve после audit.",
+            "/questions-review archive <id> - manual archive после audit.",
             "/practice - вернуться назад.",
             "",
             f"[bold]Pending generated questions[/bold]: {len(questions)}",
@@ -4509,33 +4510,96 @@ class InterviewPrepTUI(App[None]):
         prompt = one_line_preview(question.prompt, limit=180)
         hint = one_line_preview(question.hint, limit=140)
         reference = one_line_preview(question.reference_answer, limit=180)
-        return "\n".join(
+        source_retrieved_at = (
+            question.source_retrieved_at.isoformat(timespec="seconds")
+            if question.source_retrieved_at
+            else "-"
+        )
+        category_hints = ", ".join(question.source_category_hints) or "-"
+        quality_flags = ", ".join(generated_question_quality_flags(question.prompt)) or "-"
+        lines = [
+            f"- #{question.id} {escape(topic_title)} [{escape(question.difficulty)}]",
+            f"  Source: {escape(question.source)} | Status: {escape(question.source_quality_status)}",
+            (
+                "  Source metadata: "
+                f"url={escape(question.source_url or '-')} retrieved_at={escape(source_retrieved_at)}"
+            ),
+            f"  Category hints: {escape(category_hints)}",
+            f"  Frequency hint: {escape(question.source_frequency_hint or '-')}",
+            f"  Quality flags: {escape(quality_flags)}",
+        ]
+        latest_audit = self.latest_question_auto_curation_audit(question.id)
+        if latest_audit is not None:
+            lines.extend(self.questions_review_audit_context_lines(question, latest_audit))
+        lines.extend(
             [
-                f"- #{question.id} {escape(topic_title)} [{escape(question.difficulty)}]",
-                f"  Source: {escape(question.source)} | Status: {escape(question.source_quality_status)}",
                 f"  Prompt: {escape(prompt)}",
                 f"  Hint: {escape(hint)}",
                 f"  Reference: {escape(reference)}",
-                f"  Команды: /questions-review accept {question.id}; /questions-review archive {question.id}",
+                (
+                    f"  Audit actions: /questions-review accept {question.id}; "
+                    f"/questions-review archive {question.id}"
+                ),
             ]
         )
+        return "\n".join(lines)
+
+    def latest_question_auto_curation_audit(
+        self,
+        question_id: int | None,
+    ) -> QuestionAutoCurationAudit | None:
+        if question_id is None:
+            return None
+        audits = self.services.repository.list_question_auto_curation_audits(question_id=question_id, limit=1)
+        return audits[0] if audits else None
+
+    def questions_review_audit_context_lines(
+        self,
+        question: Question,
+        audit: QuestionAutoCurationAudit,
+    ) -> list[str]:
+        source_evidence = audit.curator_source_evidence or "-"
+        undo_hint = (
+            f"questions-source undo --question {question.id} restores {audit.previous_status} "
+            f"if current status is still {audit.resulting_status}"
+        )
+        if question.source_quality_status != audit.resulting_status:
+            undo_hint = (
+                f"inspect first: latest audit expected current={audit.resulting_status}, "
+                f"actual={question.source_quality_status}"
+            )
+        return [
+            (
+                f"  Latest auto-curation audit: #{audit.id or '-'} decision={escape(audit.decision)} "
+                f"confidence={audit.confidence:.2f}"
+            ),
+            f"  Curator rationale: {escape(audit.rationale)}",
+            f"  Source evidence: {escape(source_evidence)}",
+            f"  Undo hint: {escape(undo_hint)}",
+        ]
 
     def questions_review_side_panel_text(self) -> str:
         questions = self.services.questions.list_pending_review_questions()
         topic_ids = {question.topic_id for question in questions}
+        audit_context_count = sum(
+            1
+            for question in questions
+            if self.latest_question_auto_curation_audit(question.id) is not None
+        )
         lines = [
-            "[bold]Questions review[/bold]",
+            "[bold]Question audit queue[/bold]",
             "",
             "[bold]Следующее действие[/bold]",
             (
-                "Прими полезный generated question или архивируй слабый."
+                "Проверь pending_review exception; manual approve/archive нужен только после audit."
                 if questions
-                else "Pending generated questions нет; можно вернуться к practice."
+                else "Pending generated questions нет; automated curation не требует ручного действия."
             ),
             "",
             "[bold]Сводка[/bold]",
             f"Pending: {len(questions)}",
             f"Тем в очереди: {len(topic_ids)}",
+            f"С audit context: {audit_context_count}",
             "",
             "[bold]Команды[/bold]",
             "/questions-review",
@@ -5319,7 +5383,7 @@ class InterviewPrepTUI(App[None]):
         if self.mode == "content":
             return "/pause-content, /resume-content, /retry-job <id>, /materials artifacts, /practice назад"
         if self.mode == "questions_review":
-            return "/questions-review accept <id>, /questions-review archive <id>, /practice назад"
+            return "/questions-review accept <id>, /questions-review archive <id> как manual audit override, /practice назад"
         if self.mode == "auto_curation_audit":
             return "/curation-audit topic <id>, /curation-audit status <status>, /practice назад"
         if self.mode == "history":

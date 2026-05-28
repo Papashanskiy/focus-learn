@@ -58,7 +58,7 @@ from interview_prep.services.content_generation_service import (
     JOB_KIND_CURRICULUM,
     build_background_question_prompt,
 )
-from interview_prep.services.curriculum_service import CurriculumService, parse_curriculum
+from interview_prep.services.curriculum_service import CurriculumService, fallback_questions, parse_curriculum
 from interview_prep.services.evaluation_service import EvaluationService, build_rubric_evaluation_prompt
 from interview_prep.services.learning_service import LearningService, build_learning_prompt
 from interview_prep.services.question_auto_curation_service import (
@@ -74,6 +74,7 @@ from interview_prep.services.question_auto_curation_service import (
     QuestionAutoCurationService,
 )
 from interview_prep.services.question_service import QuestionService
+from interview_prep.services.question_quality_rules import generic_prompt_detail
 from interview_prep.services.question_source_service import (
     QuestionSourceService,
     SOURCE_BACKED_CANDIDATE_TEMPLATES,
@@ -259,6 +260,20 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(rows[0][0], 1)
         self.assertEqual(rows[0][1], CURRENT_SCHEMA_VERSION)
         self.assertIsNotNone(rows[0][2])
+
+    def test_current_schema_version_matches_latest_migration_step(self) -> None:
+        migration_versions: list[int] = []
+        for migration in MIGRATION_STEPS:
+            version_text, separator, _ = migration.name.partition("_")
+            self.assertEqual(separator, "_", migration.name)
+            self.assertTrue(version_text.isdigit(), migration.name)
+            migration_versions.append(int(version_text))
+
+        self.assertEqual(
+            sorted(migration_versions),
+            list(range(1, len(migration_versions) + 1)),
+        )
+        self.assertEqual(CURRENT_SCHEMA_VERSION, max(migration_versions))
 
     def test_init_db_runs_explicit_idempotent_migration_steps(self) -> None:
         migration_names = [migration.name for migration in MIGRATION_STEPS]
@@ -1109,6 +1124,55 @@ class ServiceTests(unittest.TestCase):
             self.assertGreaterEqual(len(links), 1)
             self.assertEqual(sum(1 for link in links if link.is_primary), 1)
 
+    def test_seed_defaults_links_canonical_2026_metadata_tags(self) -> None:
+        repository = make_repository()
+
+        repository.seed_defaults()
+        repository.seed_defaults()
+
+        expected_category_tags = {
+            "api-web": "api",
+            "async-queues": "async",
+            "coding-screen": "coding",
+            "ops-reliability": "ops",
+            "python-core": "python-core",
+            "sql-postgres": "db",
+            "system-design": "system-design",
+            "testing-quality": "testing",
+        }
+        questions = [
+            question
+            for question in repository.list_questions()
+            if question.source == CANONICAL_2026_SOURCE
+        ]
+
+        self.assertEqual(len(questions), len(CANONICAL_2026_QUESTIONS))
+        for question in questions:
+            self.assertIsNotNone(question.id)
+            tag_slugs = {tag.slug for tag in repository.list_question_tags(question.id or 0)}
+            self.assertIn("must-know", tag_slugs)
+            self.assertIn("frequency-high", tag_slugs)
+            matching_category_tags = {
+                tag_slug
+                for category_hint, tag_slug in expected_category_tags.items()
+                if category_hint in question.source_category_hints
+            }
+            self.assertTrue(matching_category_tags)
+            self.assertTrue(matching_category_tags.issubset(tag_slugs))
+
+        with repository.connection:
+            repository.connection.execute("DELETE FROM question_tags")
+        repository.seed_defaults()
+        restored = [
+            question
+            for question in repository.list_questions()
+            if question.source == CANONICAL_2026_SOURCE
+        ][0]
+        self.assertIn(
+            "must-know",
+            {tag.slug for tag in repository.list_question_tags(restored.id or 0)},
+        )
+
     def test_repository_tracks_question_source_quality_status(self) -> None:
         repository = make_repository()
         topic = repository.find_topic_by_slug("async-backend")
@@ -1195,6 +1259,32 @@ class ServiceTests(unittest.TestCase):
                 for question in sessions.candidate_questions(session.id or 0)
             )
         )
+
+    def test_practice_selection_prefers_canonical_must_know_over_generated_candidates(self) -> None:
+        repository = make_repository()
+        topic = repository.find_topic_by_slug("python-runtime")
+        self.assertIsNotNone(topic)
+        assert topic is not None
+        generated = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="middle",
+                prompt="Generated accepted question should not outrank canonical must-know.",
+                hint="Canonical questions should be first in normal practice ordering.",
+                reference_answer="Canonical source should be preferred for first practice exposure.",
+                source="background-llm",
+                source_quality_status=QUESTION_SOURCE_QUALITY_ACCEPTED,
+            )
+        )
+        sessions = SessionService(repository, StaticLLM())
+        session = sessions.start_session(topic_id=topic.id)
+
+        candidates = sessions.candidate_questions(session.id or 0)
+
+        self.assertNotEqual(candidates[0].id, generated.id)
+        self.assertEqual(candidates[0].source, CANONICAL_2026_SOURCE)
+        self.assertIn("must-know", candidates[0].source_category_hints)
 
     def test_question_source_refresh_persists_metadata_without_creating_questions(self) -> None:
         repository = make_repository()
@@ -2287,7 +2377,9 @@ class ServiceTests(unittest.TestCase):
         tags = repository.list_question_tags(question.id or 0)
 
         self.assertEqual([tag.slug for tag in tags], ["concurrency", "python-runtime"])
-        self.assertEqual([tag.slug for tag in repository.list_tags()], ["concurrency", "python-runtime"])
+        self.assertTrue(
+            {"concurrency", "python-runtime"}.issubset({tag.slug for tag in repository.list_tags()})
+        )
 
     def test_repository_replaces_question_tags_without_duplicates(self) -> None:
         repository = make_repository()
@@ -3586,6 +3678,25 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(question.topic_id, weak_topic.id)
         self.assertEqual(candidates[0].topic_id, weak_topic.id)
 
+    def test_mixed_session_prefers_canonical_question_within_weak_topic(self) -> None:
+        repository = make_repository()
+        sessions = SessionService(repository, StaticLLM())
+        now = datetime(2026, 5, 13, 12, 0, 0)
+        weak_topic = repository.find_topic_by_slug("databases")
+        self.assertIsNotNone(weak_topic)
+
+        for topic in repository.list_topics():
+            score = 2 if topic.id == weak_topic.id else 5
+            for _ in range(3):
+                self._save_answer(repository, topic.id or 0, score, now - timedelta(days=1))
+
+        session = sessions.start_session(topic_id=None)
+        candidates = sessions.candidate_questions(session.id or 0, now=now)
+
+        self.assertEqual(candidates[0].topic_id, weak_topic.id)
+        self.assertEqual(candidates[0].source, CANONICAL_2026_SOURCE)
+        self.assertIn("must-know", candidates[0].source_category_hints)
+
     def test_topic_session_repeats_weak_question_after_interval(self) -> None:
         repository = make_repository()
         sessions = SessionService(repository, StaticLLM())
@@ -3659,6 +3770,7 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertEqual(len({pick.question.id for pick in picks}), 5)
         self.assertTrue(all(pick.link.is_primary for pick in picks))
+        self.assertTrue(all(pick.question.source == CANONICAL_2026_SOURCE for pick in picks))
 
     def test_calibration_baseline_plan_prefers_unanswered_questions(self) -> None:
         repository = make_repository()
@@ -3770,6 +3882,7 @@ class ServiceTests(unittest.TestCase):
             [pick.competency.slug for pick in plan.picks],
             ["python-runtime", "databases", "system-design", "debugging-incidents"],
         )
+        self.assertTrue(all(pick.question.source == CANONICAL_2026_SOURCE for pick in plan.picks))
 
     def test_calibration_starts_mixed_mock_senior_interview_session_from_plan(self) -> None:
         repository = make_repository()
@@ -4353,6 +4466,47 @@ class ServiceTests(unittest.TestCase):
         llm_seed_question = next(question for question in questions if question.source == "llm-seed")
         self.assertEqual(llm_seed_question.source_quality_status, QUESTION_SOURCE_QUALITY_PENDING_REVIEW)
 
+    def test_curriculum_service_archives_generic_llm_seed_questions(self) -> None:
+        repository = make_repository()
+        service = CurriculumService(
+            repository,
+            RecordingLLM(
+                """
+                {
+                  "topics": [
+                    {
+                      "slug": "generated-quality",
+                      "title": "Quality gates",
+                      "description": "Проверка качества generated questions.",
+                      "level": "senior",
+                      "objectives": ["Отсеивать шаблонные prompts"],
+                      "subtopics": [],
+                      "questions": [
+                        {
+                          "difficulty": "senior",
+                          "prompt": "Разбери ключевой production-риск в backend-flow и какие tradeoffs важны?",
+                          "hint": "Слишком общий prompt должен быть отклонен gate.",
+                          "reference_answer": "Нужен конкретный scenario, constraints и expected mechanisms."
+                        }
+                      ],
+                      "mock_scenarios": []
+                    }
+                  ]
+                }
+                """
+            ),
+        )
+
+        service.generate_and_save(topic_count=1, questions_per_topic=1)
+
+        topic = repository.find_topic_by_slug("generated-quality")
+        self.assertIsNotNone(topic)
+        assert topic is not None
+        llm_seed_question = next(
+            question for question in repository.list_questions(topic.id) if question.source == "llm-seed"
+        )
+        self.assertEqual(llm_seed_question.source_quality_status, QUESTION_SOURCE_QUALITY_ARCHIVED)
+
     def test_curriculum_service_saves_generated_structure_from_seed(self) -> None:
         repository = make_repository()
         service = CurriculumService(repository, StaticLLM())
@@ -4623,6 +4777,38 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len(curriculum.topics), 2)
         self.assertEqual(len(curriculum.topics[0].questions), 2)
 
+    def test_curriculum_fallback_questions_are_specific_scenarios(self) -> None:
+        fallback_sets = [
+            fallback_questions("Python runtime", 3),
+            fallback_questions("async backend", 3),
+            fallback_questions("system design", 3),
+            fallback_questions("сгенерированной теме", 3),
+        ]
+        concrete_markers = (
+            "FastAPI",
+            "SQLAlchemy",
+            "GIL",
+            "worker",
+            "Redis",
+            "provider",
+            "notification service",
+            "Activity feed",
+            "Postgres",
+            "Checkout",
+            "Queue",
+            "Async endpoint",
+        )
+
+        for questions in fallback_sets:
+            self.assertEqual(len(questions), 3)
+            for question in questions:
+                self.assertIsNone(generic_prompt_detail(question.prompt), question.prompt)
+                self.assertTrue(
+                    any(marker in question.prompt for marker in concrete_markers),
+                    question.prompt,
+                )
+                self.assertNotIn("в теме", question.prompt)
+
     def test_background_question_prompt_requests_tags_and_known_competencies(self) -> None:
         prompt = build_background_question_prompt(
             "Async backend и concurrency",
@@ -4656,6 +4842,35 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("async production incident", result.created_question.prompt)
         self.assertEqual(result.artifact["source_quality_status"], QUESTION_SOURCE_QUALITY_PENDING_REVIEW)
         self.assertEqual(service.list_jobs(status="queued"), [])
+
+    def test_content_generation_archives_generic_background_question(self) -> None:
+        repository = make_repository()
+        llm = RecordingLLM(
+            """
+            {
+                "difficulty": "senior",
+                "prompt": "Разбери ключевой production-риск в backend-flow и какие tradeoffs важны?",
+                "hint": "Слишком общий prompt должен быть отклонен gate.",
+                "reference_answer": "Нужен конкретный scenario, constraints и expected mechanisms.",
+                "tag_slugs": ["quality-gate", "content-quality"],
+                "competency_slugs": ["testing-quality"]
+            }
+            """
+        )
+        service = ContentGenerationService(repository, llm)
+        topic_id = repository.find_topic_by_slug("async-backend").id
+
+        service.enqueue_question(topic_id, "Сгенерируй вопрос с quality gate")
+        result = service.process_next_job()
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.job.status, "done")
+        self.assertIsNotNone(result.created_question)
+        assert result.created_question is not None
+        self.assertEqual(result.created_question.source_quality_status, QUESTION_SOURCE_QUALITY_ARCHIVED)
+        self.assertEqual(result.artifact["source_quality_status"], QUESTION_SOURCE_QUALITY_ARCHIVED)
+        self.assertEqual(result.artifact["quality_flags"], ["generic"])
 
     def test_content_generation_links_llm_tags_and_competencies_to_generated_question(self) -> None:
         repository = make_repository()

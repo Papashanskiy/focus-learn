@@ -12,7 +12,6 @@ from interview_prep.domain.models import (
     LearningMaterial,
     Question,
     QuestionCompetencyLink,
-    QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
     SystemDesignScenario,
     Tag,
 )
@@ -20,6 +19,10 @@ from interview_prep.domain.rules import normalize_difficulty
 from interview_prep.infra.llm import LLMClient
 from interview_prep.infra.repositories import SQLiteRepository
 from interview_prep.services.curriculum_service import CurriculumService
+from interview_prep.services.question_quality_rules import (
+    generated_question_quality_flags,
+    generated_question_source_quality_status,
+)
 from interview_prep.services.question_service import QuestionService
 
 
@@ -263,6 +266,7 @@ class ContentGenerationService:
                     "question_id": question.id,
                     "prompt": question.prompt,
                     "source_quality_status": question.source_quality_status,
+                    "quality_flags": list(generated_question_quality_flags(question.prompt)),
                     "tag_slugs": tag_slugs,
                     "competency_slugs": competency_slugs,
                 }
@@ -289,8 +293,16 @@ class ContentGenerationService:
             saved_job = self.repository.get_content_generation_job(job.id or 0) or job
             return ProcessedJob(saved_job, question, artifact)
         except Exception as exc:
-            self._record_job_failure(job, str(exc))
-            self.repository.update_content_generation_job(job.id or 0, "failed", error=str(exc))
+            failure_status = self._record_job_failure(
+                job,
+                str(exc),
+                retryable=is_retryable_job_error(exc),
+            )
+            self.repository.update_content_generation_job(
+                job.id or 0,
+                failure_status,
+                error=str(exc) if failure_status == "failed" else None,
+            )
             saved_job = self.repository.get_content_generation_job(job.id or 0) or job
             return ProcessedJob(saved_job, None, None)
 
@@ -316,17 +328,20 @@ class ContentGenerationService:
             json.dumps(payload, ensure_ascii=False),
         )
 
-    def _record_job_failure(self, job: ContentGenerationJob, error: str) -> None:
+    def _record_job_failure(self, job: ContentGenerationJob, error: str, *, retryable: bool) -> str:
         payload = parse_payload(job.payload_json)
         retry = normalize_retry_metadata(payload.get("retry"))
         attempt = retry["attempt"] + 1
         delay_seconds = retry_backoff_seconds(attempt)
+        should_retry = retryable and attempt < retry["max_attempts"]
         retry.update(
             {
                 "attempt": attempt,
                 "backoff_seconds": delay_seconds,
-                "next_attempt_at": (datetime.now() + timedelta(seconds=delay_seconds)).isoformat(
-                    timespec="seconds"
+                "next_attempt_at": (
+                    (datetime.now() + timedelta(seconds=delay_seconds)).isoformat(timespec="seconds")
+                    if should_retry
+                    else None
                 ),
                 "last_error": error,
             }
@@ -336,6 +351,7 @@ class ContentGenerationService:
             job.id or 0,
             json.dumps(payload, ensure_ascii=False),
         )
+        return "queued" if should_retry else "failed"
 
     def _process_question_job(self, job: ContentGenerationJob) -> Question:
         payload = parse_payload(job.payload_json)
@@ -362,7 +378,7 @@ class ContentGenerationService:
             hint=parsed["hint"].strip(),
             reference_answer=parsed["reference_answer"].strip(),
             source="background-llm",
-            source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+            source_quality_status=generated_question_source_quality_status(parsed["prompt"]),
         )
         similar_question = self._find_similar_topic_question(topic_id, candidate.prompt)
         if similar_question is not None:
@@ -606,6 +622,10 @@ def normalize_retry_metadata(value: Any) -> dict[str, Any]:
 def retry_backoff_seconds(attempt: int) -> int:
     normalized_attempt = max(1, attempt)
     return DEFAULT_RETRY_BACKOFF_SECONDS * (2 ** (normalized_attempt - 1))
+
+
+def is_retryable_job_error(exc: Exception) -> bool:
+    return not isinstance(exc, ValueError)
 
 
 def is_job_ready_for_attempt(job: ContentGenerationJob, now: datetime | None = None) -> bool:

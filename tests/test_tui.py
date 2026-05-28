@@ -2469,11 +2469,37 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                         id=None,
                         topic_id=topic.id or 0,
                         difficulty="senior",
-                        prompt="Как review-ить generated вопрос перед practice loop?",
+                        prompt="Какие tradeoffs проверить в generated вопросе перед practice loop?",
                         hint="Проверь uniqueness, senior coverage и production realism.",
                         reference_answer="Нужно принять полезные вопросы и архивировать слабые.",
                         source="background-llm",
                         source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+                        source_url="https://example.com/interview-notes",
+                        source_retrieved_at=datetime(2026, 5, 28, 10, 30),
+                        source_category_hints=("async", "queues"),
+                        source_frequency_hint="high",
+                    )
+                )
+                assert first.id is not None
+                app.services.repository.add_question_auto_curation_audit(
+                    QuestionAutoCurationAudit(
+                        id=None,
+                        question_id=first.id,
+                        previous_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                        decision="quarantined",
+                        resulting_status=QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+                        confidence=0.72,
+                        rationale="Нужна ручная проверка senior-specific constraints.",
+                        quality_flags=["needs_audit"],
+                        curator_model="deterministic",
+                        curator_version="source-backed-auto-curation-v1",
+                        source_url="https://example.com/interview-notes",
+                        source_retrieved_at=datetime(2026, 5, 28, 10, 30),
+                        source_category_hints=["async", "queues"],
+                        source_frequency_hint="high",
+                        created_at=datetime(2026, 5, 28, 10, 45),
+                        curator_score=3,
+                        curator_source_evidence="Source mentions async queue incident reviews.",
                     )
                 )
                 second = app.services.repository.add_question(
@@ -2513,14 +2539,33 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.mode, "questions_review")
                     self.assertEqual(app.query_one("#left_panel").styles.display, "none")
                     self.assertEqual(app.query_one("#right_panel").styles.display, "block")
-                    self.assertIn("Generated questions review", center)
+                    self.assertIn("Generated question audit queue", center)
+                    self.assertIn("Automated curation is the happy path", center)
+                    self.assertIn("Manual accept/archive are audit overrides", center)
                     self.assertIn("Pending generated questions", center)
                     self.assertIn(f"#{first.id} Async backend", center)
                     self.assertIn(f"#{second.id} Async backend", center)
                     self.assertNotIn(f"#{accepted.id} Async backend", center)
+                    self.assertIn(
+                        "Source metadata: url=https://example.com/interview-notes "
+                        "retrieved_at=2026-05-28T10:30:00",
+                        center,
+                    )
+                    self.assertIn("Category hints: async, queues", center)
+                    self.assertIn("Frequency hint: high", center)
+                    self.assertIn("Quality flags: generic", center)
+                    self.assertIn("Latest auto-curation audit:", center)
+                    self.assertIn("Curator rationale: Нужна ручная проверка senior-specific constraints.", center)
+                    self.assertIn("Source evidence: Source mentions async queue incident reviews.", center)
+                    self.assertIn(
+                        f"Undo hint: questions-source undo --question {first.id} restores pending_auto_review "
+                        "if current status is still pending_review",
+                        center,
+                    )
                     self.assertIn(f"/questions-review accept {first.id}", center)
                     self.assertIn(f"/questions-review archive {second.id}", center)
                     self.assertIn("Pending: 2", side_panel)
+                    self.assertIn("С audit context: 1", side_panel)
 
                     input_bar.value = f"/questions-review accept {first.id}"
                     await pilot.press("enter")
@@ -2531,6 +2576,7 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     assert saved_first is not None
                     self.assertEqual(saved_first.source_quality_status, QUESTION_SOURCE_QUALITY_ACCEPTED)
                     self.assertIn(f"Question #{first.id} accepted", app.history_text())
+                    self.assertIn("Manual audit override:", app.history_text())
                     self.assertNotIn(f"#{first.id} Async backend", app.question_text())
                     self.assertIn(f"#{second.id} Async backend", app.question_text())
                     self.assertIn("Pending: 1", app.history_text())
@@ -2544,6 +2590,7 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     assert saved_second is not None
                     self.assertEqual(saved_second.source_quality_status, QUESTION_SOURCE_QUALITY_ARCHIVED)
                     self.assertIn(f"Question #{second.id} archived", app.history_text())
+                    self.assertIn("Manual audit override:", app.history_text())
                     self.assertIn("pending generated questions не найдены", app.question_text())
                     self.assertIn("Pending: 0", app.history_text())
             finally:
@@ -5047,9 +5094,11 @@ class TUIHelperTests(unittest.TestCase):
         self.assertIn("/pause-content", palette)
         self.assertIn("/resume-content", palette)
         self.assertIn("/retry-job", palette)
-        self.assertIn("/questions-review список", palette)
+        self.assertIn("/questions-review audit queue", palette)
         self.assertIn("/questions-review accept", palette)
+        self.assertIn("manual approve после audit", palette)
         self.assertIn("/questions-review archive", palette)
+        self.assertIn("manual archive после audit", palette)
         self.assertIn("/materials", palette)
         self.assertIn("/materials current/all", palette)
         self.assertIn("/materials scenarios current/all", palette)

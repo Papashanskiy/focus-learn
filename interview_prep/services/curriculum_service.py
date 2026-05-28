@@ -11,12 +11,12 @@ from interview_prep.domain.models import (
     CurriculumSubtopic,
     CurriculumTopic,
     Question,
-    QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
     Topic,
 )
 from interview_prep.domain.rules import normalize_difficulty
 from interview_prep.infra.llm import LLMClient
 from interview_prep.infra.repositories import SQLiteRepository
+from interview_prep.services.question_quality_rules import generated_question_source_quality_status
 
 
 @dataclass(frozen=True)
@@ -222,7 +222,9 @@ class CurriculumService:
                         hint=generated_question.hint,
                         reference_answer=generated_question.reference_answer,
                         source="llm-seed",
-                        source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+                        source_quality_status=generated_question_source_quality_status(
+                            generated_question.prompt
+                        ),
                     )
                 )
                 if saved.id is not None and not already_exists:
@@ -622,29 +624,97 @@ def fallback_curriculum(topic_count: int, questions_per_topic: int) -> Generated
 
 
 def fallback_questions(topic_title: str, count: int) -> list[GeneratedQuestion]:
-    templates = [
-        GeneratedQuestion(
-            "middle+",
-            f"Объясни ключевой production-риск в теме {topic_title} и как ты будешь его диагностировать.",
-            "Назови симптомы, метрики, logs/traces и безопасный mitigation.",
-            "Сильный ответ связывает механизм с пользовательским impact, называет telemetry, план локализации, rollback или mitigation, а затем regression coverage.",
-        ),
-        GeneratedQuestion(
-            "senior",
-            f"Как бы ты спроектировал backend-flow по теме {topic_title} с учетом отказов зависимостей?",
-            "Покрой retries, idempotency, timeouts, backpressure, observability и operational tradeoffs.",
-            "Нужно задать границы системы, определить failure modes, добавить timeouts и bounded retries, обеспечить idempotency, измерять saturation/latency/errors и выбрать degrade strategy.",
-        ),
-        GeneratedQuestion(
-            "senior",
-            f"Какие tradeoffs в теме {topic_title} чаще всего отличают senior-ответ от middle-ответа?",
-            "Сравни простое решение, production constraints, стоимость поддержки и проверяемость.",
-            "Senior-ответ явно фиксирует assumptions, сравнивает альтернативы, говорит о цене сложности, failure modes, мониторинге и способе проверить решение нагрузкой или тестами.",
-        ),
-    ]
+    templates = fallback_question_bank(topic_title)
     if count <= len(templates):
         return templates[:count]
-    return templates + [templates[-1] for _ in range(count - len(templates))]
+    return [templates[index % len(templates)] for index in range(count)]
+
+
+def fallback_question_bank(topic_title: str) -> list[GeneratedQuestion]:
+    normalized_title = topic_title.casefold()
+    if "runtime" in normalized_title or "python" in normalized_title:
+        return [
+            GeneratedQuestion(
+                "middle+",
+                "FastAPI endpoint использует аргумент функции `payload={}` и иногда возвращает данные из предыдущего запроса. Как объяснить mutable default bug и безопасно исправить его?",
+                "Покрой binding default arguments, shared state между вызовами, request-scoped данные и regression-тест на два последовательных запроса.",
+                "Сильный ответ объясняет, что mutable default создается один раз при определении функции и переиспользуется. Исправление: `None` sentinel или factory внутри функции, изоляция request state, проверка module-level cache, regression-тест на отсутствие протечки и метрики/логи для похожих incidents.",
+            ),
+            GeneratedQuestion(
+                "senior",
+                "SQLAlchemy-модель делает N+1 запросы при чтении `user.profile.name`, хотя в коде это выглядит как обычный attribute access. Как descriptor protocol участвует в таком поведении?",
+                "Разбери data/non-data descriptors, lookup order, lazy loading, скрытый IO в property/getter и диагностику числа SQL-запросов.",
+                "Сильный ответ описывает порядок поиска атрибутов и то, что ORM descriptors могут запускать lazy load. Нужно заметить риск скрытого IO и N+1, предложить query logging, eager loading/selectinload, запрет side effects в property и тесты на число запросов.",
+            ),
+            GeneratedQuestion(
+                "senior",
+                "JSON normalization в Python API грузит один worker на 100% CPU, latency растет, а threads почти не помогают. Как GIL влияет на выбор исправления?",
+                "Отдели CPU-bound и IO-bound работу, сравни process workers, process pool, native libraries, queue offload и operational limits.",
+                "Сильный ответ объясняет, что GIL ограничивает параллельное выполнение CPU-bound Python bytecode в threads. Варианты: process workers, отдельный worker service, native/vectorized library, лимиты payload, backpressure и load-test с метриками CPU, latency и memory.",
+            ),
+        ]
+    if "async" in normalized_title:
+        return [
+            GeneratedQuestion(
+                "middle+",
+                "Async worker обрабатывает webhooks, во время deploy получает cancellation и часть задач остается в статусе `processing`. Как спроектировать graceful shutdown?",
+                "Покрой cancellation propagation, ack после commit, idempotency key, timeout на drain и recovery зависших задач.",
+                "Сильный ответ переносит ack после durable commit, делает обработку идемпотентной, ловит cancellation только в безопасных границах, задает drain timeout, возвращает незавершенные задачи в очередь и добавляет метрики stuck jobs, retry count и shutdown duration.",
+            ),
+            GeneratedQuestion(
+                "senior",
+                "Сервис fan-out отправляет уведомления через provider API, получает 429, а Redis queue lag растет быстрее, чем workers успевают читать. Как добавить backpressure и retry budget?",
+                "Разбери bounded concurrency, rate limits, exponential backoff с jitter, DLQ, приоритеты и alerts по queue lag.",
+                "Сильный ответ ограничивает concurrency per provider, уважает rate-limit headers, вводит retry budget и backoff с jitter, отделяет retry/DLQ, приоритизирует важные события, показывает degrade mode и метрики queue lag, provider errors, saturation и age oldest job.",
+            ),
+            GeneratedQuestion(
+                "senior",
+                "Async endpoint параллельно запрашивает inventory, pricing и recommendations; одна зависимость висит 20 секунд и держит весь response. Как задать timeout и partial failure policy?",
+                "Покрой `asyncio.wait_for`/task groups, cancellation дочерних задач, fallback response, tracing и contract с клиентом.",
+                "Сильный ответ задает per-dependency timeout и общий request deadline, отменяет дочерние задачи при истечении бюджета, явно выбирает partial response или fail-fast по contract, логирует dependency latency/errors, добавляет traces и тесты на timeout/cancellation.",
+            ),
+        ]
+    if "system" in normalized_title or "design" in normalized_title:
+        return [
+            GeneratedQuestion(
+                "senior",
+                "Спроектируй notification service для email/push/SMS: есть user preferences, quiet hours, provider fallback и всплеск событий после marketing campaign. С чего начнешь?",
+                "Покрой requirements, API для enqueue/status/preferences, durable queue, idempotency, provider adapters и delivery observability.",
+                "Сильный ответ начинает с scope, traffic и SLA, проектирует enqueue/status/preferences API, data model, durable queue/outbox, idempotency/deduplication, provider fallback с rate limits, quiet hours/time zones, retry/DLQ и dashboards по delivery, lag и provider health.",
+            ),
+            GeneratedQuestion(
+                "senior",
+                "Activity feed стал медленным для популярных аккаунтов: cache hit rate высокий, но иногда пользователи видят чужие приватные события. Как redesign cache policy?",
+                "Разбери cache key с tenant/user/permissions, invalidation, TTL, hot keys, stampede protection и privacy regression tests.",
+                "Сильный ответ фиксирует consistency и privacy constraints, включает user/tenant/permission scope в cache key, выбирает TTL/invalidation, защищает hot keys через single-flight/jitter/stale-while-revalidate, добавляет тесты на permission leaks и метрики hit rate, stale age и latency.",
+            ),
+            GeneratedQuestion(
+                "senior",
+                "Endpoint `/export` должен выгружать миллион строк из Postgres без OOM и без долгой блокировки транзакций. Как спроектировать streaming export?",
+                "Покрой cursor/chunking, transaction lifetime, client disconnect, backpressure, limits, retries и memory metrics.",
+                "Сильный ответ читает данные chunk-by-chunk, контролирует transaction/cursor lifetime, закрывает ресурсы при client disconnect, ограничивает размер выгрузки и concurrency, вводит timeout/backpressure, показывает retry semantics и проверяет bounded memory нагрузочным тестом.",
+            ),
+        ]
+    return [
+        GeneratedQuestion(
+            "middle+",
+            "Checkout endpoint иногда дважды списывает оплату, когда payment provider отвечает timeout после успешного charge. Как спроектировать idempotency и расследовать текущие дубли?",
+            "Покрой idempotency key, уникальный constraint, provider reconciliation, retry policy, audit trail и customer impact.",
+            "Сильный ответ связывает timeout с uncertain outcome, вводит idempotency key и unique constraint, сохраняет request/charge audit trail, делает reconciliation с provider, ограничивает retries, добавляет алерты по duplicate charge и regression-тесты на повтор запроса.",
+        ),
+        GeneratedQuestion(
+            "senior",
+            "Postgres migration добавляет `NOT NULL` колонку к таблице `orders` на 80M строк, и deploy нельзя останавливать. Как провести изменение без долгих locks?",
+            "Разбери expand/contract, backfill batches, defaults, constraint validation, rollback и мониторинг lock waits.",
+            "Сильный ответ предлагает multi-step migration: nullable column, batched backfill, code writing both versions, check constraint `NOT VALID`, validation отдельно, затем `NOT NULL`/cleanup. Нужно мониторить locks, replication lag, batch duration и иметь rollback plan.",
+        ),
+        GeneratedQuestion(
+            "senior",
+            "Queue worker пишет результаты в S3 и Postgres, но после retry появляются дубли файлов и разные статусы job. Как сделать обработку идемпотентной?",
+            "Покрой deterministic object keys, transaction boundaries, status machine, retry safety, DLQ и reconciliation.",
+            "Сильный ответ выбирает deterministic key или content hash, фиксирует state transitions, делает writes идемпотентными, разделяет external side effects и DB commit, добавляет reconciliation job, DLQ, метрики duplicate attempts и тесты на повтор после crash.",
+        ),
+    ]
 
 
 def parse_string_list(value: Any) -> list[str]:

@@ -1,5 +1,68 @@
 # Development Log
 
+## 2026-05-28
+
+### Migration schema-version guard
+
+- Закрыт roadmap leaf про migration hygiene: `CURRENT_SCHEMA_VERSION` проверен против последнего explicit migration step (`020_question_auto_curation_audit_tables`) и уже равен `20`.
+- Добавлен regression-тест, который валидирует числовые prefixes `MIGRATION_STEPS` как непрерывную последовательность и падает, если `CURRENT_SCHEMA_VERSION` расходится с последним migration step.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_current_schema_version_matches_latest_migration_step tests.test_services.ServiceTests.test_init_db_creates_schema_version_table_with_current_version tests.test_services.ServiceTests.test_init_db_runs_explicit_idempotent_migration_steps tests.test_services.ServiceTests.test_init_db_upgrades_legacy_practice_database_to_current_schema -v`, `python -m compileall interview_prep`.
+
+### Source curation docs sync
+
+- Закрыт roadmap docs leaf после source refresh, auto-curation, canonical pack и quality gate: README теперь описывает source-backed refresh/candidates flow, automated approval policy, audit/undo surfaces и приоритет `canonical-2026` questions.
+- `ROADMAP.md` обновлен: docs leaf закрыт, Done получил короткий итог, known limitations больше не говорят, что 0A quality/canonical/curation observability остаются открытыми.
+- Проверки: `python -m compileall interview_prep`, `rg -n "Source curation docs sync|Качество и источники вопросов|Docs: после source refresh|quality gate|canonical-2026" README.md DEVELOPMENT_LOG.md ROADMAP.md`.
+
+### Questions-review happy path copy
+
+- Закрыт roadmap leaf: CLI/TUI `questions-review` теперь подписан как audit queue для pending exceptions, где automated curation является happy path, а `accept`/`archive` явно названы manual audit overrides.
+- Поведение accept/archive не менялось: команды по-прежнему только переводят pending-review question в `accepted` или `archived` без удаления строки.
+- Проверки: `python -m unittest tests.test_cli_flow.CLIFlowTests.test_questions_review_lists_pending_generated_questions tests.test_cli_flow.CLIFlowTests.test_questions_review_accepts_and_archives_pending_questions tests.test_tui.TUITests.test_tui_questions_review_lists_and_updates_pending_generated_questions tests.test_tui.TUIHelperTests.test_command_palette_text_lists_core_commands -v`, `python -m compileall interview_prep`.
+
+### Questions-review audit context
+
+- Закрыт roadmap leaf: CLI/TUI `questions-review` теперь для pending questions с сохраненным auto-curation audit row показывает latest decision, curator rationale, source evidence и safe undo hint через `questions-source undo --question <id>`.
+- Без изменения accept/archive behavior: audit context только помогает понять, почему вопрос попал в audit/review path и какой безопасный undo доступен через существующий CLI flow.
+- Проверки: `python -m unittest tests.test_cli_flow.CLIFlowTests.test_questions_review_lists_pending_generated_questions tests.test_tui.TUITests.test_tui_questions_review_lists_and_updates_pending_generated_questions -v`, `python -m compileall interview_prep`.
+
+### TUI questions-review observability
+
+- Закрыт TUI display leaf: `/questions-review` теперь показывает pending generated questions с source URL/retrieved metadata, category hints, frequency hint и deterministic quality flags без изменения accept/archive behavior.
+- Regression-тест TUI review flow проверяет metadata/flags в focused screen и прежнее обновление очереди после accept/archive.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_questions_review_lists_and_updates_pending_generated_questions -v`, `python -m compileall interview_prep`.
+
+### Questions review CLI observability
+
+- Первый open roadmap item про curation observability был слишком крупным для одной итерации, поэтому он разбит в `## Next` на CLI display, TUI display, audit context и happy-path copy leaves.
+- Закрыт CLI display leaf: `questions-review` теперь показывает pending questions с source URL/retrieved metadata, category hints, frequency hint и deterministic quality flags без изменения accept/archive behavior.
+- Проверки: `python -m unittest tests.test_cli_flow.CLIFlowTests.test_questions_review_lists_pending_generated_questions tests.test_cli_flow.CLIFlowTests.test_questions_review_accepts_and_archives_pending_questions -v`, `python -m compileall interview_prep`.
+
+### Curriculum fallback specificity
+
+- Закрыт roadmap leaf про `fallback_questions()`: fallback curriculum больше не строит generic prompts с подстановкой названия темы, а возвращает concrete canonical-style scenarios для Python runtime, async backend, system design и parser fallback.
+- Добавлен regression-тест, который проверяет fallback prompts через общий generic wording detector и concrete scenario markers.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_parse_curriculum_falls_back_on_invalid_json tests.test_services.ServiceTests.test_curriculum_fallback_questions_are_specific_scenarios tests.test_services.ServiceTests.test_curriculum_service_archives_generic_llm_seed_questions tests.test_services.ServiceTests.test_curriculum_service_generates_and_saves_llm_seed_questions -v`, `python -m compileall interview_prep`, `python -m unittest tests.test_services -v` (138 tests, 1 optional Ollama skip; existing ResourceWarning про in-memory sqlite connections).
+
+### Content quality generation gate
+
+- Закрыт roadmap leaf про quality gate для generated prompts: общие phrases вроде `ключевой production-риск`, `backend-flow` и `какие tradeoffs` вынесены в общий rule helper, а background/curriculum generated questions с такими prompt сразу сохраняются как `archived`.
+- Нормальные generated questions по-прежнему попадают в `pending_review`; для background job artifact добавлены `quality_flags`, чтобы UI/diagnostics могли показать причину gate.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_content_generation_archives_generic_background_question tests.test_services.ServiceTests.test_content_generation_queue_creates_background_question tests.test_services.ServiceTests.test_curriculum_service_archives_generic_llm_seed_questions tests.test_services.ServiceTests.test_curriculum_service_generates_and_saves_llm_seed_questions -v`, `python -m unittest tests.test_cli_flow.CLIFlowTests.test_questions_audit_lists_generic_duplicate_and_too_long_questions -v`, `python -m unittest tests.test_services -v` (137 tests, 1 optional Ollama skip; existing ResourceWarning про in-memory sqlite connections), `python -m compileall interview_prep`.
+- Дополнительно запускался `python -m unittest discover -s tests -v`: текущий full discover падает в двух TUI regression-тестах `test_tui_practice_question_shows_linked_tags`/`test_tui_practice_question_shows_linked_competencies`, потому что существующий canonical-priority selection выбирает canonical question вместо вручную размеченного fixture question.
+
+### Practice selection canonical priority
+
+- Закрыт roadmap leaf про practice selection: добавлен общий service-level rank для accepted canonical `must-know` questions и подключен к topic/mixed practice ordering, baseline plan и mock senior interview plan.
+- Приоритет canonical ставится после weak-repeat в обычной practice и после answer-count в baseline/mock selection, поэтому due weak question и unanswered calibration candidate не теряются, но first exposure выбирает curated `canonical-2026` pack перед generated/bootstrap rows.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_practice_selection_prefers_canonical_must_know_over_generated_candidates tests.test_services.ServiceTests.test_calibration_baseline_plan_picks_five_distinct_competencies tests.test_services.ServiceTests.test_calibration_baseline_plan_prefers_unanswered_questions tests.test_services.ServiceTests.test_mock_senior_interview_plan_mixes_interview_sections tests.test_services.ServiceTests.test_mixed_session_next_question_prioritizes_weak_topic tests.test_services.ServiceTests.test_mixed_session_prefers_canonical_question_within_weak_topic tests.test_services.ServiceTests.test_topic_session_repeats_weak_question_after_interval -v`, `python -m unittest tests.test_services -v` (135 tests, 1 optional Ollama skip; existing ResourceWarning про in-memory sqlite connections), `python -m compileall interview_prep`.
+
+### Canonical metadata tags
+
+- Закрыт roadmap leaf про canonical metadata: `seed_defaults()` теперь идемпотентно создает metadata tags для `canonical-2026` и привязывает accepted canonical questions к `must-know`, `frequency-high` и top-level type tags (`python-core`, `coding`, `api`, `db`, `async`, `system-design`, `testing`, `ops`) через существующие `tags`/`question_tags`.
+- Новая схема не понадобилась: frequency/type metadata идет через tags, а competency metadata остается через существующие `question_competencies`; повторный seed восстанавливает canonical tag links и не заменяет пользовательские/manual tags.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_seed_defaults_links_canonical_2026_metadata_tags tests.test_services.ServiceTests.test_repository_persists_reusable_question_tags -v`, `python -m compileall interview_prep`, `python -m unittest tests.test_services.ServiceTests.test_seed_defaults_adds_minimal_bootstrap_and_canonical_questions tests.test_services.ServiceTests.test_seed_defaults_adds_idempotent_canonical_2026_python_core_batch tests.test_services.ServiceTests.test_seed_defaults_adds_idempotent_canonical_2026_coding_api_sql_batch tests.test_services.ServiceTests.test_seed_defaults_adds_idempotent_canonical_2026_async_system_testing_ops_batch tests.test_services.ServiceTests.test_seed_defaults_adds_canonical_2026_count_and_category_coverage tests.test_services.ServiceTests.test_seed_defaults_links_canonical_2026_metadata_tags tests.test_services.ServiceTests.test_seed_defaults_links_bootstrap_questions_to_senior_competencies tests.test_services.ServiceTests.test_repository_persists_reusable_question_tags tests.test_services.ServiceTests.test_repository_replaces_question_tags_without_duplicates tests.test_services.ServiceTests.test_repository_filters_questions_by_tag_slug -v`, `python -m unittest tests.test_cli_flow.CLIFlowTests.test_questions_command_filters_by_tag_slug -v`, `python -m unittest tests.test_services -v` (133 tests, 1 optional Ollama skip; есть существующие ResourceWarning про незакрытые in-memory sqlite connections, без failures).
+
 ## 2026-05-27
 
 ### Canonical coverage completion

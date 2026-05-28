@@ -24,6 +24,8 @@
 - Markdown в AI feedback, учебных ответах, system design replies и preview generated artifacts отображается через Rich Markdown renderer.
 - Генерация расширенного starter pack тем, subtopics, learning objectives и вопросов через локальную LLM командой `generate-seed`.
 - Автоматическая фоновая генерация дополнительных вопросов из TUI, когда по выбранной теме мало контента.
+- Source-backed curation flow для вопросов: refresh сохраняет metadata источников, candidates создаются своими словами, auto-curation принимает high-confidence вопросы, архивирует generic/duplicates и оставляет audit/undo.
+- First-run seed содержит curated `canonical-2026` pack из 40 accepted must-know вопросов; baseline, Today drill и mock interview отдают им приоритет после weak-repeat/answer-count signals.
 - Статистика: сессии, ответы, последние сессии, динамика по темам.
 - Read-only TUI history browser завершенных practice sessions по topic/session/date с просмотром вопроса, ответа, self-score, эталона и AI feedback; `/history learning` показывает saved learning dialogs по session/context, `/history learning <session-id>` открывает конкретный learning dialog read-only, `/history learning <topic-id> <YYYY-MM-DD>` оставлен для legacy-группировки по дате, а `/history system-design` показывает сохраненный final feedback и rubric scores system design mock sessions.
 - Минимальный read-only WSGI adapter skeleton для будущего web UI: `/api/smoke`, `/api/dashboard`, `/api/readiness`, `/api/competencies`, `/api/sessions/<id>`, `/api/notebook` и health endpoints поверх существующего service facade.
@@ -137,6 +139,16 @@ python -m interview_prep questions-review archive 42
 `questions-source undo [--question <id>]` безопасно откатывает последний matching auto-curation decision: команда восстанавливает previous status только если текущий status вопроса все еще равен audited resulting status. Audit row остается в SQLite для истории; если вопрос уже изменился вручную или другим decision, undo откажется перезаписывать status.
 
 `questions-review` показывает generated questions со статусом `pending_review`. Команда `accept` переводит вопрос в `accepted`, а `archive` скрывает слабый generated question из будущего practice loop без удаления строки из SQLite.
+
+### Качество и источники вопросов
+
+Source-backed pipeline разделен на безопасные этапы. `questions-source refresh` работает только с whitelist источников из `QUESTION_SOURCE_RESEARCH.md` и сохраняет metadata/snapshots; `questions-source candidates` создает собственные paraphrased candidates со source URL, retrieved date, category hints и frequency hint. Вопросы не попадают в practice, пока не получат статус `accepted`.
+
+Automated curation является основным flow: deterministic gates и optional strict JSON LLM curator принимают high-confidence source-backed questions, архивируют obvious generic/duplicate candidates и оставляют ambiguous rows в quarantine. Audit surfaces `questions-source audit`, `/curation-audit`, `questions-review` и `questions-source undo` нужны для проверки и безопасного отката, а не для обязательного ручного approve каждого вопроса.
+
+Generated background/curriculum questions дополнительно проходят quality gate: очевидные дубли и generic prompts без конкретного scenario, constraints и expected mechanisms архивируются, а нормальные generated questions остаются `pending_review` как audit exceptions.
+
+Bootstrap coverage держится на curated `canonical-2026` pack: 40 accepted must-know questions по Python core/runtime, coding screen, API/web, SQL/Postgres, async/queues, system design, testing и ops/reliability. Эти вопросы получают tags `must-know`, `frequency-high` и type tags вроде `coding`, `api`, `db`, `system-design`; baseline, Today drill и mock interview при first exposure предпочитают canonical questions перед generated accepted rows, не ломая повторение слабых тем.
 
 Запуск ежедневной сессии:
 
