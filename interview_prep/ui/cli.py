@@ -7,7 +7,9 @@ from collections.abc import Sequence
 
 from interview_prep.domain.models import (
     AnswerEvaluation,
+    QUESTION_SOURCE_QUALITY_STATUSES,
     Question,
+    QuestionAutoCurationAudit,
     QuestionCompetencyLink,
     QuestionSourceSnapshot,
     SESSION_STATUS_COMPLETED,
@@ -33,7 +35,10 @@ from interview_prep.services.question_quality_audit_service import (
     DEFAULT_MAX_QUESTION_PROMPT_CHARS,
     QuestionQualityFinding,
 )
-from interview_prep.services.question_auto_curation_service import QuestionAutoCurationDecision
+from interview_prep.services.question_auto_curation_service import (
+    QuestionAutoCurationDecision,
+    QuestionAutoCurationUndoResult,
+)
 from interview_prep.services.readiness_service import ReadinessSnapshot
 
 
@@ -124,10 +129,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     questions_source_parser.add_argument(
         "action",
-        choices=["refresh", "candidates", "auto-curate"],
+        choices=["refresh", "candidates", "auto-curate", "audit", "undo"],
         help="Source metadata action",
     )
-    questions_source_parser.add_argument("--topic", type=int, help="ID темы для auto-curation preview")
+    questions_source_parser.add_argument("--topic", type=int, help="ID темы для auto-curation/audit/undo")
+    questions_source_parser.add_argument("--question", type=int, help="ID question для audit/undo")
+    questions_source_parser.add_argument(
+        "--status",
+        choices=QUESTION_SOURCE_QUALITY_STATUSES,
+        help="Resulting source_quality status для audit display/undo filter",
+    )
+    questions_source_parser.add_argument("--limit", type=int, default=20, help="Сколько audit decisions показать")
     questions_source_parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -501,6 +513,54 @@ def cmd_questions_source(args: argparse.Namespace, services: AppServices) -> int
             )
         return 0
 
+    if args.action == "audit":
+        try:
+            audits = services.repository.list_question_auto_curation_audits(
+                question_id=args.question,
+                topic_id=args.topic,
+                resulting_status=args.status,
+                limit=args.limit,
+            )
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        filters = []
+        if args.question is not None:
+            filters.append(f"question #{args.question}")
+        if args.topic is not None:
+            filters.append(f"topic #{args.topic}")
+        if args.status is not None:
+            filters.append(f"status {args.status}")
+        filter_label = f" for {', '.join(filters)}" if filters else ""
+        print(f"Question source auto-curation audit{filter_label}: {len(audits)} decision(s).")
+        if not audits:
+            print("No auto-curation audit decisions found.")
+            return 0
+        topics = {topic.id: topic.title for topic in services.questions.list_topics()}
+        for audit in audits:
+            question = services.repository.get_question(audit.question_id)
+            print()
+            print(format_auto_curation_audit_for_cli(audit, question, topics.get(question.topic_id) if question else None))
+        return 0
+
+    if args.action == "undo":
+        try:
+            result = services.question_auto_curation.undo_latest_decision(
+                question_id=args.question,
+                topic_id=args.topic,
+                resulting_status=args.status,
+                dry_run=args.dry_run,
+            )
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        question = services.repository.get_question(result.audit.question_id)
+        topic = None
+        if question is not None:
+            topic = {item.id: item.title for item in services.questions.list_topics()}.get(question.topic_id)
+        print(format_auto_curation_undo_for_cli(result, topic))
+        return 0
+
     if args.action == "auto-curate":
         try:
             if args.dry_run:
@@ -596,6 +656,66 @@ def format_auto_curation_decision_for_cli(decision: QuestionAutoCurationDecision
     if decision.duplicate_of_id is not None:
         lines.insert(2, f"duplicate_of=#{decision.duplicate_of_id}")
     return "\n".join(lines)
+
+
+def format_auto_curation_audit_for_cli(
+    audit: QuestionAutoCurationAudit,
+    question: Question | None,
+    topic_title: str | None,
+) -> str:
+    retrieved_at = audit.source_retrieved_at.isoformat(timespec="seconds") if audit.source_retrieved_at else "unknown"
+    current_status = question.source_quality_status if question else "missing"
+    topic_label = topic_title or (f"topic #{question.topic_id}" if question else "unknown")
+    prompt = question.prompt if question else "question row is unavailable"
+    lines = [
+        (
+            f"#{audit.id or '-'} question=#{audit.question_id} topic={topic_label} "
+            f"decision={audit.decision} confidence={audit.confidence:.2f}"
+        ),
+        f"status={audit.previous_status} -> {audit.resulting_status} current={current_status}",
+        f"curator={audit.curator_model} version={audit.curator_version} score={audit.curator_score or '-'}",
+        f"url={audit.source_url or '-'} retrieved_at={retrieved_at}",
+        f"category_hints={', '.join(audit.source_category_hints) or '-'}",
+        f"frequency_hint={audit.source_frequency_hint or '-'}",
+        f"quality_flags={', '.join(audit.quality_flags) or '-'}",
+        f"source_evidence={audit.curator_source_evidence or '-'}",
+        f"rationale={audit.rationale}",
+        f"prompt={prompt}",
+    ]
+    if audit.duplicate_of_id is not None:
+        lines.insert(2, f"duplicate_of=#{audit.duplicate_of_id}")
+    return "\n".join(lines)
+
+
+def format_auto_curation_undo_for_cli(
+    result: QuestionAutoCurationUndoResult,
+    topic_title: str | None,
+) -> str:
+    audit = result.audit
+    question = result.question_before
+    topic_label = topic_title or f"topic #{question.topic_id}"
+    mode = "undo dry-run" if result.dry_run else "undo"
+    if result.dry_run:
+        status_line = (
+            f"would_restore={question.source_quality_status} -> {audit.previous_status}"
+            if result.changed
+            else f"would_keep={question.source_quality_status}"
+        )
+    else:
+        status_line = (
+            f"status={result.question_before.source_quality_status} -> {result.question_after.source_quality_status}"
+            if result.changed
+            else f"status={result.question_after.source_quality_status} unchanged"
+        )
+    return "\n".join(
+        [
+            f"Question source auto-curation {mode}: audit #{audit.id or '-'} question #{audit.question_id}.",
+            f"topic={topic_label} decision={audit.decision}",
+            status_line,
+            "audit_row=kept",
+            f"prompt={question.prompt}",
+        ]
+    )
 
 
 def format_question_tags(tags: Sequence[Tag]) -> str:

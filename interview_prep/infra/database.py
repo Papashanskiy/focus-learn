@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 
 DEFAULT_DB_PATH = Path("data/interview_prep.db")
-CURRENT_SCHEMA_VERSION = 19
+CURRENT_SCHEMA_VERSION = 20
 
 
 class MigrationStep(NamedTuple):
@@ -473,6 +473,40 @@ CREATE INDEX IF NOT EXISTS idx_question_source_snapshots_retrieved
         """
 CREATE INDEX IF NOT EXISTS idx_question_source_snapshots_source_url
     ON question_source_snapshots(source_id, url);
+""",
+    ),
+    MigrationStep(
+        "020_question_auto_curation_audit_tables",
+        """
+CREATE TABLE IF NOT EXISTS question_auto_curation_audits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+    previous_status TEXT NOT NULL
+        CHECK (previous_status IN ('pending_review', 'pending_auto_review', 'accepted', 'archived')),
+    decision TEXT NOT NULL
+        CHECK (decision IN ('auto_accepted', 'auto_archived', 'quarantined')),
+    resulting_status TEXT NOT NULL
+        CHECK (resulting_status IN ('pending_review', 'pending_auto_review', 'accepted', 'archived')),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    curator_score INTEGER CHECK (curator_score BETWEEN 1 AND 5),
+    rationale TEXT NOT NULL,
+    quality_flags_json TEXT NOT NULL DEFAULT '[]',
+    duplicate_of_id INTEGER REFERENCES questions(id) ON DELETE SET NULL,
+    curator_source_evidence TEXT,
+    curator_model TEXT NOT NULL,
+    curator_version TEXT NOT NULL,
+    source_url TEXT,
+    source_retrieved_at TEXT,
+    source_category_hints_json TEXT NOT NULL DEFAULT '[]',
+    source_frequency_hint TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_question_auto_curation_audits_question
+    ON question_auto_curation_audits(question_id, created_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_question_auto_curation_audits_decision
+    ON question_auto_curation_audits(decision, created_at, id);
 """,
     ),
 )

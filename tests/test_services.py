@@ -38,12 +38,16 @@ from interview_prep.domain.models import (
     SystemDesignScenario,
     SystemDesignTranscriptMessage,
     Tag,
+    Topic,
 )
 from interview_prep.infra.database import CURRENT_SCHEMA_VERSION, MIGRATION_STEPS, init_db
 from interview_prep.infra.seed import (
     BOOTSTRAP_QUESTIONS,
+    CANONICAL_2026_QUESTIONS,
+    CANONICAL_2026_SOURCE,
     RUBRIC_DIMENSIONS,
     SENIOR_COMPETENCIES,
+    SEED_QUESTIONS,
     SYSTEM_DESIGN_RUBRIC_DIMENSIONS,
 )
 from interview_prep.infra.llm import FallbackLLMClient, LLMUnavailable, OllamaClient
@@ -58,6 +62,7 @@ from interview_prep.services.curriculum_service import CurriculumService, parse_
 from interview_prep.services.evaluation_service import EvaluationService, build_rubric_evaluation_prompt
 from interview_prep.services.learning_service import LearningService, build_learning_prompt
 from interview_prep.services.question_auto_curation_service import (
+    AUTO_CURATION_AUDIT_VERSION,
     AUTO_CURATION_DECISION_AUTO_ACCEPTED,
     AUTO_CURATION_DECISION_AUTO_ARCHIVED,
     AUTO_CURATION_DECISION_QUARANTINED,
@@ -65,6 +70,7 @@ from interview_prep.services.question_auto_curation_service import (
     AUTO_CURATION_FLAG_INCOMPLETE_SOURCE_METADATA,
     AUTO_CURATION_FLAG_LLM_CURATOR,
     AUTO_CURATION_FLAG_LLM_PARSE_FALLBACK,
+    DETERMINISTIC_CURATOR_MODEL,
     QuestionAutoCurationService,
 )
 from interview_prep.services.question_service import QuestionService
@@ -300,6 +306,7 @@ class ServiceTests(unittest.TestCase):
             "system_design_evaluations",
             "system_design_evaluation_scores",
             "question_source_snapshots",
+            "question_auto_curation_audits",
         }
         self.assertTrue(expected_tables.issubset(tables))
 
@@ -393,6 +400,7 @@ class ServiceTests(unittest.TestCase):
                 "system_design_evaluations",
                 "system_design_evaluation_scores",
                 "question_source_snapshots",
+                "question_auto_curation_audits",
             }.issubset(tables)
         )
         version = connection.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()
@@ -888,18 +896,218 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("archived_at", columns)
         self.assertIn("archive_reason", columns)
 
-    def test_seed_defaults_adds_minimal_bootstrap_topics_and_questions(self) -> None:
+    def test_seed_defaults_adds_minimal_bootstrap_and_canonical_questions(self) -> None:
         repository = make_repository()
 
         self.assertEqual(len(repository.list_topics()), 5)
-        self.assertEqual(len(repository.list_questions()), 5)
-        self.assertTrue(all(question.source == "bootstrap" for question in repository.list_questions()))
+        self.assertEqual(len(repository.list_questions()), len(SEED_QUESTIONS))
+        self.assertEqual(
+            len([question for question in repository.list_questions() if question.source == "bootstrap"]),
+            len(BOOTSTRAP_QUESTIONS),
+        )
+        self.assertEqual(
+            len([question for question in repository.list_questions() if question.source == CANONICAL_2026_SOURCE]),
+            len(CANONICAL_2026_QUESTIONS),
+        )
         self.assertTrue(
             all(
                 question.source_quality_status == QUESTION_SOURCE_QUALITY_ACCEPTED
                 for question in repository.list_questions()
             )
         )
+
+    def test_seed_defaults_adds_idempotent_canonical_2026_python_core_batch(self) -> None:
+        repository = make_repository()
+
+        repository.seed_defaults()
+        repository.seed_defaults()
+
+        questions = [
+            question
+            for question in repository.list_questions()
+            if question.source == CANONICAL_2026_SOURCE and "python-core" in question.source_category_hints
+        ]
+        expected_questions = [
+            question for question in CANONICAL_2026_QUESTIONS if "python-core" in question.source_category_hints
+        ]
+        python_runtime = repository.find_topic_by_slug("python-runtime")
+        self.assertIsNotNone(python_runtime)
+        assert python_runtime is not None
+        self.assertEqual(len(questions), len(expected_questions))
+        self.assertTrue(all(question.topic_id == python_runtime.id for question in questions))
+        self.assertTrue(all(question.source_quality_status == QUESTION_SOURCE_QUALITY_ACCEPTED for question in questions))
+        self.assertTrue(all(question.source_frequency_hint == "high" for question in questions))
+        self.assertTrue(all("python-core" in question.source_category_hints for question in questions))
+        prompts = {question.prompt for question in questions}
+        self.assertTrue(any("payload={}" in prompt for prompt in prompts))
+        self.assertTrue(any("descriptor protocol" in prompt for prompt in prompts))
+        self.assertTrue(any("GIL" in prompt for prompt in prompts))
+
+    def test_seed_defaults_adds_idempotent_canonical_2026_coding_api_sql_batch(self) -> None:
+        repository = make_repository()
+
+        repository.seed_defaults()
+        repository.seed_defaults()
+
+        batch_category_slugs = {"coding-screen", "api-web", "sql-postgres"}
+        questions = [
+            question
+            for question in repository.list_questions()
+            if question.source == CANONICAL_2026_SOURCE
+            and batch_category_slugs.intersection(question.source_category_hints)
+        ]
+        expected_questions = [
+            question
+            for question in CANONICAL_2026_QUESTIONS
+            if batch_category_slugs.intersection(question.source_category_hints)
+        ]
+        python_runtime = repository.find_topic_by_slug("python-runtime")
+        system_design = repository.find_topic_by_slug("system-design")
+        databases = repository.find_topic_by_slug("databases")
+        self.assertIsNotNone(python_runtime)
+        self.assertIsNotNone(system_design)
+        self.assertIsNotNone(databases)
+        assert python_runtime is not None
+        assert system_design is not None
+        assert databases is not None
+
+        self.assertEqual(len(questions), len(expected_questions))
+        self.assertEqual(sum("coding-screen" in question.source_category_hints for question in questions), 5)
+        self.assertEqual(sum("api-web" in question.source_category_hints for question in questions), 5)
+        self.assertEqual(sum("sql-postgres" in question.source_category_hints for question in questions), 5)
+        self.assertTrue(all(question.source_quality_status == QUESTION_SOURCE_QUALITY_ACCEPTED for question in questions))
+        self.assertTrue(all(question.source_frequency_hint == "high" for question in questions))
+        self.assertTrue(all("must-know" in question.source_category_hints for question in questions))
+        self.assertTrue(
+            all(
+                question.topic_id == python_runtime.id
+                for question in questions
+                if "coding-screen" in question.source_category_hints
+            )
+        )
+        self.assertTrue(
+            all(
+                question.topic_id == system_design.id
+                for question in questions
+                if "api-web" in question.source_category_hints
+            )
+        )
+        self.assertTrue(
+            all(
+                question.topic_id == databases.id
+                for question in questions
+                if "sql-postgres" in question.source_category_hints
+            )
+        )
+        prompts = {question.prompt for question in questions}
+        self.assertTrue(any("user_id" in prompt for prompt in prompts))
+        self.assertTrue(any("/orders/{id}" in prompt for prompt in prompts))
+        self.assertTrue(any("50M rows" in prompt for prompt in prompts))
+
+    def test_seed_defaults_adds_idempotent_canonical_2026_async_system_testing_ops_batch(self) -> None:
+        repository = make_repository()
+
+        repository.seed_defaults()
+        repository.seed_defaults()
+
+        batch_category_slugs = {"async-queues", "system-design", "testing-quality", "ops-reliability"}
+        questions = [
+            question
+            for question in repository.list_questions()
+            if question.source == CANONICAL_2026_SOURCE
+            and batch_category_slugs.intersection(question.source_category_hints)
+        ]
+        expected_questions = [
+            question
+            for question in CANONICAL_2026_QUESTIONS
+            if batch_category_slugs.intersection(question.source_category_hints)
+        ]
+        async_backend = repository.find_topic_by_slug("async-backend")
+        system_design = repository.find_topic_by_slug("system-design")
+        testing_quality = repository.find_topic_by_slug("testing-quality")
+        self.assertIsNotNone(async_backend)
+        self.assertIsNotNone(system_design)
+        self.assertIsNotNone(testing_quality)
+        assert async_backend is not None
+        assert system_design is not None
+        assert testing_quality is not None
+
+        self.assertEqual(len(questions), len(expected_questions))
+        self.assertEqual(sum("async-queues" in question.source_category_hints for question in questions), 5)
+        self.assertEqual(sum("system-design" in question.source_category_hints for question in questions), 5)
+        self.assertEqual(sum("testing-quality" in question.source_category_hints for question in questions), 5)
+        self.assertEqual(sum("ops-reliability" in question.source_category_hints for question in questions), 5)
+        self.assertTrue(all(question.source_quality_status == QUESTION_SOURCE_QUALITY_ACCEPTED for question in questions))
+        self.assertTrue(all(question.source_frequency_hint == "high" for question in questions))
+        self.assertTrue(all("must-know" in question.source_category_hints for question in questions))
+        self.assertTrue(
+            all(
+                question.topic_id == async_backend.id
+                for question in questions
+                if "async-queues" in question.source_category_hints
+            )
+        )
+        self.assertTrue(
+            all(
+                question.topic_id == system_design.id
+                for question in questions
+                if "system-design" in question.source_category_hints
+            )
+        )
+        self.assertTrue(
+            all(
+                question.topic_id == testing_quality.id
+                for question in questions
+                if "testing-quality" in question.source_category_hints
+            )
+        )
+        prompts = {question.prompt for question in questions}
+        self.assertTrue(any("fan-out" in prompt for prompt in prompts))
+        self.assertTrue(any("notification service" in prompt for prompt in prompts))
+        self.assertTrue(any("zero-downtime migration" in prompt for prompt in prompts))
+        self.assertTrue(any("SLO" in prompt for prompt in prompts))
+
+    def test_seed_defaults_adds_canonical_2026_count_and_category_coverage(self) -> None:
+        repository = make_repository()
+
+        repository.seed_defaults()
+        repository.seed_defaults()
+
+        questions = [
+            question
+            for question in repository.list_questions()
+            if question.source == CANONICAL_2026_SOURCE
+        ]
+        coverage_categories = (
+            "python-core",
+            "coding-screen",
+            "api-web",
+            "sql-postgres",
+            "async-queues",
+            "system-design",
+            "testing-quality",
+            "ops-reliability",
+        )
+        coverage_counts = {
+            category: sum(category in question.source_category_hints for question in questions)
+            for category in coverage_categories
+        }
+
+        self.assertEqual(len(CANONICAL_2026_QUESTIONS), 40)
+        self.assertEqual(len(questions), 40)
+        self.assertEqual(coverage_counts, {category: 5 for category in coverage_categories})
+        self.assertEqual(
+            {question.prompt for question in questions},
+            {question.prompt for question in CANONICAL_2026_QUESTIONS},
+        )
+        self.assertTrue(all(question.source_quality_status == QUESTION_SOURCE_QUALITY_ACCEPTED for question in questions))
+        self.assertTrue(all(question.source_frequency_hint == "high" for question in questions))
+        self.assertTrue(all("must-know" in question.source_category_hints for question in questions))
+        for question in questions:
+            self.assertIsNotNone(question.id)
+            links = repository.list_question_competencies(question.id or 0)
+            self.assertGreaterEqual(len(links), 1)
+            self.assertEqual(sum(1 for link in links if link.is_primary), 1)
 
     def test_repository_tracks_question_source_quality_status(self) -> None:
         repository = make_repository()
@@ -1224,6 +1432,76 @@ class ServiceTests(unittest.TestCase):
             repository.get_question(missing_metadata.id or 0).source_quality_status,
             QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
         )
+        audits = {
+            audit.question_id: audit
+            for audit in repository.list_question_auto_curation_audits()
+        }
+        self.assertEqual(set(audits), {good.id, generic.id, missing_metadata.id})
+        good_audit = audits[good.id or 0]
+        self.assertEqual(good_audit.previous_status, QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW)
+        self.assertEqual(good_audit.decision, AUTO_CURATION_DECISION_AUTO_ACCEPTED)
+        self.assertEqual(good_audit.resulting_status, QUESTION_SOURCE_QUALITY_ACCEPTED)
+        self.assertEqual(good_audit.curator_model, DETERMINISTIC_CURATOR_MODEL)
+        self.assertEqual(good_audit.curator_version, AUTO_CURATION_AUDIT_VERSION)
+        self.assertEqual(good_audit.source_url, "https://docs.python.org/3/library/asyncio.html")
+        self.assertEqual(good_audit.source_category_hints, ["async", "queues"])
+        self.assertEqual(good_audit.source_frequency_hint, "official-docs:common-async-production")
+        generic_audit = audits[generic.id or 0]
+        self.assertEqual(generic_audit.decision, AUTO_CURATION_DECISION_AUTO_ARCHIVED)
+        self.assertEqual(generic_audit.resulting_status, QUESTION_SOURCE_QUALITY_ARCHIVED)
+        self.assertIn(AUTO_CURATION_FLAG_GENERIC, generic_audit.quality_flags)
+        missing_metadata_audit = audits[missing_metadata.id or 0]
+        self.assertEqual(missing_metadata_audit.decision, AUTO_CURATION_DECISION_QUARANTINED)
+        self.assertEqual(missing_metadata_audit.resulting_status, QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW)
+
+    def test_question_auto_curation_undo_latest_decision_restores_previous_status_safely(self) -> None:
+        repository = make_repository()
+        topic = repository.find_topic_by_slug("async-backend")
+        self.assertIsNotNone(topic)
+        assert topic is not None
+        retrieved_at = datetime(2026, 5, 27, 9, 0, 0)
+        question = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt=(
+                    "Async webhook worker получает burst событий и downstream API отвечает timeout. "
+                    "Как ты задашь bounded concurrency, idempotency и queue lag alerts?"
+                ),
+                hint="High-confidence source-backed candidate.",
+                reference_answer="Нужны bounded queue, idempotency key, retry budget и lag metrics.",
+                source="source-backed",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                source_url="https://docs.python.org/3/library/asyncio.html",
+                source_retrieved_at=retrieved_at,
+                source_category_hints=("async", "queues"),
+                source_frequency_hint="official-docs:common-async-production",
+            )
+        )
+        service = QuestionAutoCurationService(repository)
+
+        service.apply_pending_source_backed_candidates(topic_id=topic.id)
+        undo = service.undo_latest_decision(question_id=question.id)
+
+        self.assertFalse(undo.dry_run)
+        self.assertTrue(undo.changed)
+        self.assertEqual(undo.audit.question_id, question.id)
+        self.assertEqual(
+            undo.question_before.source_quality_status,
+            QUESTION_SOURCE_QUALITY_ACCEPTED,
+        )
+        self.assertEqual(
+            undo.question_after.source_quality_status,
+            QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+        )
+        self.assertEqual(
+            repository.get_question(question.id or 0).source_quality_status,
+            QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+        )
+        self.assertEqual(len(repository.list_question_auto_curation_audits(question_id=question.id)), 1)
+        with self.assertRaisesRegex(ValueError, "current status"):
+            service.undo_latest_decision(question_id=question.id)
 
     def test_question_auto_curation_llm_curator_accepts_ambiguous_candidate_before_apply(self) -> None:
         class AcceptingCuratorLLM(FallbackLLMClient):
@@ -1280,6 +1558,15 @@ class ServiceTests(unittest.TestCase):
             repository.get_question(ambiguous.id or 0).source_quality_status,
             QUESTION_SOURCE_QUALITY_ACCEPTED,
         )
+        audits = repository.list_question_auto_curation_audits(question_id=ambiguous.id)
+        self.assertEqual(len(audits), 1)
+        self.assertEqual(audits[0].curator_score, 4)
+        self.assertEqual(
+            audits[0].curator_source_evidence,
+            "asyncio docs snapshot and common-async-production frequency hint",
+        )
+        self.assertEqual(audits[0].curator_model, "AcceptingCuratorLLM")
+        self.assertEqual(audits[0].curator_version, AUTO_CURATION_AUDIT_VERSION)
 
     def test_question_auto_curation_llm_curator_parse_fallback_keeps_quarantine(self) -> None:
         class InvalidCuratorLLM(FallbackLLMClient):
@@ -1408,13 +1695,16 @@ class ServiceTests(unittest.TestCase):
         repository.seed_defaults()
         repository.seed_defaults()
 
-        expected_by_topic_slug = {question.topic_slug: question.competency_links for question in BOOTSTRAP_QUESTIONS}
+        expected_by_question = {
+            (question.source, question.topic_slug, question.prompt): question.competency_links
+            for question in SEED_QUESTIONS
+        }
         for question in repository.list_questions():
             topic = repository.get_topic(question.topic_id)
             self.assertIsNotNone(topic)
             self.assertIsNotNone(question.id)
             assert topic is not None
-            expected_links = expected_by_topic_slug[topic.slug]
+            expected_links = expected_by_question[(question.source, topic.slug, question.prompt)]
             links = repository.list_question_competencies(question.id or 0)
 
             actual = {link.competency.slug: (link.is_primary, link.weight) for link in links}
@@ -1423,7 +1713,7 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(sum(1 for link in links if link.is_primary), 1)
 
         link_count = connection.execute("SELECT COUNT(*) AS c FROM question_competencies").fetchone()["c"]
-        self.assertEqual(link_count, sum(len(question.competency_links) for question in BOOTSTRAP_QUESTIONS))
+        self.assertEqual(link_count, sum(len(question.competency_links) for question in SEED_QUESTIONS))
 
     def test_init_db_creates_question_competency_link_storage(self) -> None:
         repository = make_repository()
@@ -2012,7 +2302,10 @@ class ServiceTests(unittest.TestCase):
 
     def test_repository_filters_questions_by_tag_slug(self) -> None:
         repository = make_repository()
-        first_question, second_question = repository.list_questions()[:2]
+        first_question = repository.list_questions()[0]
+        second_question = next(
+            question for question in repository.list_questions() if question.topic_id != first_question.topic_id
+        )
         concurrency = repository.upsert_tag(Tag(id=None, slug="concurrency", title="Concurrency"))
         databases = repository.upsert_tag(Tag(id=None, slug="databases", title="Databases"))
         repository.set_question_tags(first_question.id or 0, [concurrency.id or 0])
@@ -3361,7 +3654,7 @@ class ServiceTests(unittest.TestCase):
                 "async-concurrency",
                 "databases",
                 "system-design",
-                "testing-quality",
+                "observability",
             ],
         )
         self.assertEqual(len({pick.question.id for pick in picks}), 5)
@@ -3376,7 +3669,7 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNotNone(python_runtime)
         assert python_topic is not None
         assert python_runtime is not None
-        bootstrap_question = repository.list_questions(python_topic.id or 0)[0]
+        existing_python_questions = repository.list_questions(python_topic.id or 0)
         unanswered_question = repository.add_question(
             Question(
                 id=None,
@@ -3392,13 +3685,14 @@ class ServiceTests(unittest.TestCase):
             unanswered_question.id or 0,
             [QuestionCompetencyLink(competency=python_runtime, is_primary=True)],
         )
-        self._save_answer_for_question(
-            repository,
-            bootstrap_question.id or 0,
-            python_topic.id or 0,
-            5,
-            now,
-        )
+        for answered_question in existing_python_questions:
+            self._save_answer_for_question(
+                repository,
+                answered_question.id or 0,
+                python_topic.id or 0,
+                5,
+                now,
+            )
 
         picks = CalibrationService(repository).baseline_question_plan(limit=1)
 
@@ -3474,7 +3768,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len(set(plan.question_ids)), 4)
         self.assertEqual(
             [pick.competency.slug for pick in plan.picks],
-            ["python-runtime", "databases", "system-design", "observability"],
+            ["python-runtime", "databases", "system-design", "debugging-incidents"],
         )
 
     def test_calibration_starts_mixed_mock_senior_interview_session_from_plan(self) -> None:
@@ -4549,7 +4843,8 @@ class ServiceTests(unittest.TestCase):
         repository = make_repository()
         service = ContentGenerationService(repository, StaticLLM())
         topic_id = repository.find_topic_by_slug("async-backend").id
-        question_before = repository.list_questions(topic_id)[0]
+        questions_before = repository.list_questions(topic_id)
+        question_before = questions_before[0]
 
         job = service.enqueue_reference_answer_regeneration(topic_id, "Освежи senior эталон")
         result = service.process_next_job()
@@ -4561,8 +4856,8 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNone(result.created_question)
         self.assertIsNotNone(result.artifact)
         self.assertEqual(result.artifact["kind"], "reference-answer")
-        self.assertEqual(result.artifact["updated_count"], 1)
-        self.assertEqual(result.artifact["question_ids"], [question_before.id])
+        self.assertEqual(result.artifact["updated_count"], len(questions_before))
+        self.assertEqual(result.artifact["question_ids"], [question.id for question in questions_before])
         self.assertIsNotNone(question_after)
         self.assertNotEqual(question_after.reference_answer, question_before.reference_answer)
         self.assertIn("Обновленный эталон", question_after.reference_answer)
@@ -5107,7 +5402,16 @@ class ServiceTests(unittest.TestCase):
     def test_content_generation_ensure_question_backlog_avoids_duplicate_active_jobs(self) -> None:
         repository = make_repository()
         service = ContentGenerationService(repository, StaticLLM())
-        topic_id = repository.find_topic_by_slug("async-backend").id
+        topic = repository.upsert_topic(
+            Topic(
+                id=None,
+                slug="low-content-topic",
+                title="Low content topic",
+                description="Topic without accepted questions for backlog tests.",
+                level="senior",
+            )
+        )
+        topic_id = topic.id
 
         first_job = service.ensure_question_backlog(topic_id, min_questions=4, note="auto")
         second_job = service.ensure_question_backlog(topic_id, min_questions=4, note="auto")

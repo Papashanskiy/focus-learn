@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 from typing import Any
 from dataclasses import dataclass
+from datetime import datetime
 
 from interview_prep.domain.models import (
     QUESTION_SOURCE_QUALITY_ACCEPTED,
     QUESTION_SOURCE_QUALITY_ARCHIVED,
     QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
     Question,
+    QuestionAutoCurationAudit,
 )
 from interview_prep.infra.llm import LLMClient, LLMUnavailable
 from interview_prep.infra.repositories import SQLiteRepository
@@ -37,6 +39,8 @@ MIN_HIGH_CONFIDENCE_PROMPT_CHARS = 80
 LLM_AUTO_ACCEPT_MIN_CONFIDENCE = 0.85
 LLM_AUTO_ACCEPT_MIN_SCORE = 4
 LLM_AUTO_ARCHIVE_MIN_CONFIDENCE = 0.75
+AUTO_CURATION_AUDIT_VERSION = "source-backed-auto-curation-v1"
+DETERMINISTIC_CURATOR_MODEL = "deterministic-gates"
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,15 @@ class QuestionAutoCurationPreviewResult:
     accepted_count: int = 0
     archived_count: int = 0
     quarantined_count: int = 0
+
+
+@dataclass(frozen=True)
+class QuestionAutoCurationUndoResult:
+    audit: QuestionAutoCurationAudit
+    question_before: Question
+    question_after: Question
+    dry_run: bool = False
+    changed: bool = False
 
 
 class QuestionAutoCurationService:
@@ -131,22 +144,33 @@ class QuestionAutoCurationService:
         for decision in result.decisions:
             if decision.question.id is None:
                 raise ValueError("Cannot apply auto-curation to an unsaved question")
+            resulting_status = QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW
             if decision.decision == AUTO_CURATION_DECISION_AUTO_ACCEPTED:
+                resulting_status = QUESTION_SOURCE_QUALITY_ACCEPTED
                 self.repository.update_question_source_quality_status(
                     decision.question.id,
-                    QUESTION_SOURCE_QUALITY_ACCEPTED,
+                    resulting_status,
                 )
                 accepted_count += 1
             elif decision.decision == AUTO_CURATION_DECISION_AUTO_ARCHIVED:
+                resulting_status = QUESTION_SOURCE_QUALITY_ARCHIVED
                 self.repository.update_question_source_quality_status(
                     decision.question.id,
-                    QUESTION_SOURCE_QUALITY_ARCHIVED,
+                    resulting_status,
                 )
                 archived_count += 1
             elif decision.decision == AUTO_CURATION_DECISION_QUARANTINED:
                 quarantined_count += 1
             else:
                 raise ValueError(f"Unknown auto-curation decision: {decision.decision}")
+            self.repository.add_question_auto_curation_audit(
+                build_auto_curation_audit_entry(
+                    decision,
+                    previous_status=decision.question.source_quality_status,
+                    resulting_status=resulting_status,
+                    curator_model=curator_model_label(decision, self.llm),
+                )
+            )
 
         return QuestionAutoCurationPreviewResult(
             decisions=result.decisions,
@@ -156,6 +180,105 @@ class QuestionAutoCurationService:
             archived_count=archived_count,
             quarantined_count=quarantined_count,
         )
+
+    def undo_latest_decision(
+        self,
+        question_id: int | None = None,
+        *,
+        topic_id: int | None = None,
+        resulting_status: str | None = None,
+        dry_run: bool = False,
+    ) -> QuestionAutoCurationUndoResult:
+        if question_id is not None and question_id < 1:
+            raise ValueError("question_id must be positive")
+        if topic_id is not None and topic_id < 1:
+            raise ValueError("topic_id must be positive")
+
+        audits = self.repository.list_question_auto_curation_audits(
+            question_id=question_id,
+            topic_id=topic_id,
+            resulting_status=resulting_status,
+            limit=1,
+        )
+        if not audits:
+            raise ValueError("No auto-curation audit decisions found to undo.")
+        audit = audits[0]
+        question = self.repository.get_question(audit.question_id)
+        if question is None:
+            raise ValueError(f"Cannot undo audit #{audit.id or '-'}: question #{audit.question_id} is missing.")
+        if question.source_quality_status != audit.resulting_status:
+            raise ValueError(
+                f"Cannot undo audit #{audit.id or '-'} for question #{audit.question_id}: "
+                f"current status is {question.source_quality_status}, expected {audit.resulting_status}."
+            )
+
+        changed = question.source_quality_status != audit.previous_status
+        if dry_run:
+            return QuestionAutoCurationUndoResult(
+                audit=audit,
+                question_before=question,
+                question_after=question,
+                dry_run=True,
+                changed=changed,
+            )
+
+        updated = self.repository.update_question_source_quality_status(
+            audit.question_id,
+            audit.previous_status,
+        )
+        return QuestionAutoCurationUndoResult(
+            audit=audit,
+            question_before=question,
+            question_after=updated,
+            changed=changed,
+        )
+
+
+def build_auto_curation_audit_entry(
+    decision: QuestionAutoCurationDecision,
+    *,
+    previous_status: str,
+    resulting_status: str,
+    curator_model: str,
+) -> QuestionAutoCurationAudit:
+    question = decision.question
+    if question.id is None:
+        raise ValueError("Cannot audit auto-curation for an unsaved question")
+    return QuestionAutoCurationAudit(
+        id=None,
+        question_id=question.id,
+        previous_status=previous_status,
+        decision=decision.decision,
+        resulting_status=resulting_status,
+        confidence=decision.confidence,
+        rationale=decision.rationale,
+        quality_flags=list(decision.quality_flags),
+        duplicate_of_id=decision.duplicate_of_id,
+        curator_score=decision.curator_score,
+        curator_source_evidence=decision.curator_source_evidence,
+        curator_model=curator_model,
+        curator_version=AUTO_CURATION_AUDIT_VERSION,
+        source_url=question.source_url,
+        source_retrieved_at=question.source_retrieved_at,
+        source_category_hints=list(question.source_category_hints),
+        source_frequency_hint=question.source_frequency_hint,
+        created_at=datetime.now(),
+    )
+
+
+def curator_model_label(decision: QuestionAutoCurationDecision, llm: LLMClient | None) -> str:
+    if AUTO_CURATION_FLAG_LLM_CURATOR not in decision.quality_flags:
+        return DETERMINISTIC_CURATOR_MODEL
+    if llm is None:
+        return "llm-unavailable"
+    candidate = llm
+    if getattr(llm, "last_error", None) and hasattr(llm, "fallback"):
+        candidate = getattr(llm, "fallback")
+    elif hasattr(llm, "primary"):
+        candidate = getattr(llm, "primary")
+    model = getattr(candidate, "model", None)
+    class_name = type(candidate).__name__
+    return f"{class_name}:{model}" if model else class_name
 
 
 def classify_source_backed_candidate(

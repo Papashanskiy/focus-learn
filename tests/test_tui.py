@@ -20,8 +20,10 @@ from interview_prep.domain.models import (
     NotebookEntry,
     QUESTION_SOURCE_QUALITY_ACCEPTED,
     QUESTION_SOURCE_QUALITY_ARCHIVED,
+    QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
     QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
     Question,
+    QuestionAutoCurationAudit,
     QuestionCompetencyLink,
     SESSION_STATUS_ABANDONED,
     SESSION_OUTCOME_TYPE_CALIBRATION_BASELINE,
@@ -1219,6 +1221,11 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     center = app.question_text()
                     self.assertIn("Recommended drill: Перерешать слабый ответ", center)
                     self.assertIn("низкая rubric оценка", center)
+                    drill = app.today_recommended_drill()
+                    self.assertIsNotNone(drill)
+                    assert drill is not None
+                    expected_topic_id = app.today_topic_id_for_competency(drill.competency.slug)
+                    self.assertIsNotNone(expected_topic_id)
 
                     clicked = await pilot.click("#today-review-weak-answer")
                     await pilot.pause()
@@ -1227,7 +1234,7 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.mode, "answering")
                     self.assertIsNotNone(app.topic)
                     assert app.topic is not None
-                    self.assertEqual(app.topic.slug, "databases")
+                    self.assertEqual(app.topic.id, expected_topic_id)
                     self.assertIn("Вопрос #", app.question_text())
             finally:
                 app.services.close()
@@ -2539,6 +2546,128 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(f"Question #{second.id} archived", app.history_text())
                     self.assertIn("pending generated questions не найдены", app.question_text())
                     self.assertIn("Pending: 0", app.history_text())
+            finally:
+                app.services.close()
+
+    async def test_tui_auto_curation_audit_lists_saved_decisions_with_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_auto_curation_audit.db"))
+            try:
+                topic = app.services.repository.find_topic_by_slug("async-backend")
+                self.assertIsNotNone(topic)
+                assert topic is not None
+                retrieved_at = datetime(2026, 5, 27, 9, 0, 0)
+                accepted = app.services.repository.add_question(
+                    Question(
+                        id=None,
+                        topic_id=topic.id or 0,
+                        difficulty="senior",
+                        prompt=(
+                            "Async webhook worker получает burst событий и downstream timeout. "
+                            "Как задашь bounded concurrency и idempotency?"
+                        ),
+                        hint="High-confidence source-backed candidate.",
+                        reference_answer="Нужны bounded queue, idempotency key, retry budget и lag metrics.",
+                        source="source-backed",
+                        source_quality_status=QUESTION_SOURCE_QUALITY_ACCEPTED,
+                        source_url="https://docs.python.org/3/library/asyncio.html",
+                        source_retrieved_at=retrieved_at,
+                        source_category_hints=("async", "queues"),
+                        source_frequency_hint="official-docs:common-async-production",
+                    )
+                )
+                archived = app.services.repository.add_question(
+                    Question(
+                        id=None,
+                        topic_id=topic.id or 0,
+                        difficulty="senior",
+                        prompt="Разбери ключевой production-риск в backend-flow и какие tradeoffs важны?",
+                        hint="Generic source-backed candidate.",
+                        reference_answer="Generic candidate.",
+                        source="source-backed",
+                        source_quality_status=QUESTION_SOURCE_QUALITY_ARCHIVED,
+                        source_url="https://example.test/source",
+                        source_retrieved_at=retrieved_at,
+                        source_category_hints=("async",),
+                        source_frequency_hint="interview-coverage:generic",
+                    )
+                )
+                app.services.repository.add_question_auto_curation_audit(
+                    QuestionAutoCurationAudit(
+                        id=None,
+                        question_id=accepted.id or 0,
+                        previous_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                        decision="auto_accepted",
+                        resulting_status=QUESTION_SOURCE_QUALITY_ACCEPTED,
+                        confidence=0.91,
+                        rationale="Concrete async worker signal is interview-useful.",
+                        quality_flags=["specific_scenario"],
+                        curator_model="CuratorLLM",
+                        curator_version="source-backed-auto-curation-v1",
+                        source_url="https://docs.python.org/3/library/asyncio.html",
+                        source_retrieved_at=retrieved_at,
+                        source_category_hints=["async", "queues"],
+                        source_frequency_hint="official-docs:common-async-production",
+                        created_at=retrieved_at,
+                        curator_score=4,
+                        curator_source_evidence="asyncio docs snapshot and production queue frequency hint",
+                    )
+                )
+                app.services.repository.add_question_auto_curation_audit(
+                    QuestionAutoCurationAudit(
+                        id=None,
+                        question_id=archived.id or 0,
+                        previous_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                        decision="auto_archived",
+                        resulting_status=QUESTION_SOURCE_QUALITY_ARCHIVED,
+                        confidence=0.88,
+                        rationale="Prompt is too generic for source-backed practice.",
+                        quality_flags=["generic"],
+                        curator_model="deterministic-gates",
+                        curator_version="source-backed-auto-curation-v1",
+                        source_url="https://example.test/source",
+                        source_retrieved_at=retrieved_at,
+                        source_category_hints=["async"],
+                        source_frequency_hint="interview-coverage:generic",
+                        created_at=retrieved_at,
+                    )
+                )
+
+                async with app.run_test(size=(120, 36)) as pilot:
+                    input_bar = app.query_one("#input_bar", TextArea)
+
+                    input_bar.value = f"/curation-audit topic {topic.id} status accepted"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    center = app.question_text()
+                    side_panel = app.history_text()
+                    self.assertEqual(app.mode, "auto_curation_audit")
+                    self.assertEqual(app.query_one("#left_panel").styles.display, "none")
+                    self.assertEqual(app.query_one("#right_panel").styles.display, "block")
+                    self.assertIn("Auto-curation audit", center)
+                    self.assertIn(f"Фильтр[/bold]: topic #{topic.id}, status accepted", center)
+                    self.assertIn(f"question=#{accepted.id}", center)
+                    self.assertIn("decision=auto_accepted", center)
+                    self.assertIn("Quality flags: specific_scenario", center)
+                    self.assertIn("Source evidence: asyncio docs snapshot", center)
+                    self.assertIn("Rationale: Concrete async worker signal", center)
+                    self.assertNotIn(f"question=#{archived.id}", center)
+                    self.assertIn("Decisions: 1", side_panel)
+                    self.assertIn("Accepted: 1", side_panel)
+                    self.assertIn("/curation-audit topic <id>", side_panel)
+
+                    input_bar.value = f"/curation-audit question {archived.id}"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    archived_center = app.question_text()
+                    self.assertIn(f"question=#{archived.id}", archived_center)
+                    self.assertIn("decision=auto_archived", archived_center)
+                    self.assertIn("Quality flags: generic", archived_center)
+                    self.assertIn("Rationale: Prompt is too generic", archived_center)
+                    self.assertNotIn(f"question=#{accepted.id}", archived_center)
+                    self.assertIn("Archived: 1", app.history_text())
             finally:
                 app.services.close()
 

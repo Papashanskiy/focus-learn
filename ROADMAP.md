@@ -7,7 +7,7 @@
 Главные текущие проблемы:
 
 - После ревью и проверки локальной SQLite-базы качество вопросов стало главным продуктовым blocker: в accepted generated questions уже есть слишком общие сценарии, а часть pending LLM seed вопросов выглядит как шаблонные prompts без конкретного interview-сигнала.
-- Базовый curated-набор частых вопросов с собеседований отсутствует: `infra/seed.py` оставляет минимальный fallback-набор тем и по одному общему вопросу на тему, а первый запуск не гарантирует покрытие Python core, coding screen, API/web, SQL/Postgres, async/queues, system design, testing и ops.
+- Базовый curated-набор частых вопросов с собеседований теперь покрыт первым full pack: `infra/seed.py` добавляет 40 accepted `canonical-2026` must-know вопросов по Python core/runtime, coding screen, API/web, SQL/Postgres, async/queues, system design, testing и ops.
 - Content curation сейчас слишком ручной: `questions-review` требует от пользователя принимать решения об approve/archive, хотя целевой flow должен автоматически принимать high-confidence source-backed вопросы и оставлять человеку только audit/undo.
 - Интерфейс TUI перегружен рабочими окнами, служебными командами и secondary surfaces; нужен минималистичный режим с game-like menu выбора режима и одним очевидным следующим действием.
 - Фоновая генерация контента происходит неравномерно и может простаивать; приложению нужен always-on scheduler, который сам держит запас вопросов/материалов/scenarios по gaps и refresh policy.
@@ -36,7 +36,7 @@
 - CLI `interview-report` экспортирует Markdown-отчет перед интервью по latest или выбранной completed practice session: readiness signal, strengths/gaps, evidence answers и next plan.
 - CLI `curriculum-status` показывает read-only покрытие generated curriculum: counts curriculum topics/subtopics/objectives/questions и пустые зоны bootstrap/fallback.
 - Generated content уже появляется в приложении; для generated questions добавлен первый quality gate против очевидных дублей внутри темы, storage foundation source_quality/status (`pending_review`/`accepted`/`archived`), CLI `questions-review` и TUI `/questions-review` для pending review/accept/archive. Background question generation уже просит LLM вернуть tag/competency slugs и безопасно привязывает tags/known competencies к новым вопросам; generated materials/scenarios можно архивировать с optional reason; еще нет оценки полезности generated artifacts.
-- Source refresh pipeline уже может превращать whitelisted source snapshots в собственные `source-backed` candidate questions со статусом `pending_auto_review`, source URL/retrieved metadata, category hints и frequency hint; deterministic auto-curation может принять high-confidence candidates в practice или архивировать generic/duplicate, а quarantine остается вне practice до audit/undo surface.
+- Source refresh pipeline уже может превращать whitelisted source snapshots в собственные `source-backed` candidate questions со статусом `pending_auto_review`, source URL/retrieved metadata, category hints и frequency hint; deterministic/LLM auto-curation может принять high-confidence candidates в practice или архивировать generic/duplicate, non-dry-run decisions сохраняются в audit storage, CLI `questions-source audit` и TUI `/curation-audit` read-only показывают saved decisions. CLI `questions-source undo` безопасно откатывает последний matching decision, если текущий статус вопроса все еще совпадает с audited resulting status.
 - TUI refactor уже выделил pure render helpers, practice/learning/system-design controllers и content worker orchestration; дальнейшие TUI-фичи должны сохранять этот контракт и не возвращать state transitions обратно в монолитный `ui/tui.py`.
 
 ## Product principles
@@ -61,6 +61,14 @@
 
 ## Done
 
+- [x] Canonical coverage completion: `canonical-2026` first-run seed pack now contains 40 accepted must-know questions with 5-question coverage for each target interview category and regression coverage.
+- [x] Canonical async/system-design/testing/ops batch: first-run seed now adds accepted `canonical-2026` must-know questions for async queues, system design, testing/migrations and ops/reliability with competency links.
+- [x] Canonical questions Python core batch: first-run seed now adds accepted `canonical-2026` Python runtime/core must-know questions with competency links.
+- [x] Canonical coding/API/SQL batch: first-run seed now adds accepted `canonical-2026` coding screen, API/web and SQL/Postgres must-know questions with source metadata and competency links.
+- [x] Auto-curation audit TUI display: TUI `/curation-audit` read-only lists saved auto-curation decisions with question/topic/status filters, source evidence, quality flags and curator rationale.
+- [x] Auto-curation audit undo: CLI `questions-source undo` restores the previous question status for the latest matching auto-curation decision while keeping the audit row and refusing stale overwrites.
+- [x] Auto-curation audit storage foundation: non-dry-run `questions-source auto-curate` records decision, previous/resulting status, confidence, rationale, quality flags, curator score/evidence, model/version and source metadata in SQLite for later audit/undo surfaces.
+- [x] Auto-curation audit CLI display: `questions-source audit` read-only lists saved decisions by question/topic/resulting status with source evidence, quality flags, curator metadata and rationale.
 - [x] Auto-curation LLM curator rubric: `questions-source auto-curate --llm-curator` can run strict JSON LLM review for quarantined source-backed candidates before applying status changes, with safe quarantine fallback on invalid/low-confidence output.
 - [x] Auto-curation deterministic apply: CLI `questions-source auto-curate` применяет deterministic `auto_accepted`/`auto_archived` statuses и оставляет quarantine вне practice.
 - [x] Auto-curation deterministic dry-run: CLI `questions-source auto-curate --dry-run` классифицирует pending source-backed candidates в `auto_accepted`/`auto_archived`/`quarantined` без изменения SQLite.
@@ -322,8 +330,16 @@
   - [x] Deterministic dry-run: классифицировать pending source-backed candidates в `auto_accepted`/`auto_archived`/`quarantined` без изменения SQLite.
   - [x] Apply deterministic decisions: обновлять statuses для `auto_accepted`/`auto_archived`, оставляя `quarantined` вне practice до audit/undo surface.
   - [x] LLM curator rubric: добавить strict prompt/parse fallback для ambiguous quarantine cases перед автоматическим изменением статусов.
-- [ ] Auto-curation audit: сохранять curator score, rationale, model/version, source evidence и decision (`auto_accepted`, `auto_archived`, `quarantined`), чтобы пользователь мог посмотреть и откатить решение, но не обязан approve вручную.
-- [ ] Canonical questions: на основе source research добавить non-LLM seed pack `canonical-2026` с первой партией из 40 must-know вопросов для Python core, coding screen, API/web, SQL/Postgres, async/queues, system design, testing и ops.
+- [x] Auto-curation audit: сохранять curator score, rationale, model/version, source evidence и decision (`auto_accepted`, `auto_archived`, `quarantined`), чтобы пользователь мог посмотреть и откатить решение, но не обязан approve вручную.
+  - [x] Audit storage foundation: добавить SQLite/domain/repository storage для auto-curation decisions и писать audit rows при non-dry-run `questions-source auto-curate`.
+  - [x] Audit display CLI: добавить read-only `questions-source audit` со списком auto-curation decisions по вопросу/topic/resulting status, включая source evidence, quality flags и curator rationale.
+  - [x] Audit display TUI: добавить read-only TUI surface со списком auto-curation decisions по вопросу/topic/status, включая source evidence, quality flags и LLM rationale.
+  - [x] Audit undo: добавить безопасный undo для последнего auto-curation decision, который восстанавливает previous status без удаления audit row.
+- [x] Canonical questions: на основе source research добавить non-LLM seed pack `canonical-2026` с первой партией из 40 must-know вопросов для Python core, coding screen, API/web, SQL/Postgres, async/queues, system design, testing и ops.
+  - [x] Canonical Python core batch: добавить первые accepted `canonical-2026` вопросы по Python runtime/core с source metadata и competency links.
+  - [x] Canonical coding/API/SQL batch: добавить следующую accepted batch для coding screen, API/web и SQL/Postgres.
+  - [x] Canonical async/system-design/testing/ops batch: добавить следующую accepted batch для async/queues, system design, testing и ops.
+  - [x] Canonical coverage completion: довести `canonical-2026` до 40 must-know вопросов и покрыть count/coverage regression-тестом.
 - [ ] Canonical metadata: хранить для seeded questions frequency/type/competency metadata через существующие tags/competencies; добавлять новую схему только если tags не покрывают `must_know`, `coding`, `api`, `db`, `system_design`.
 - [ ] Practice selection: при first-run baseline, Today drill и mock interview отдавать приоритет accepted canonical must-know questions перед generated accepted questions, сохраняя повторение weak topics.
 - [ ] Content quality gate: отклонять или отправлять на review generated prompts с generic wording вроде "ключевой production-риск", "backend-flow" или "какие tradeoffs" без конкретного scenario, constraints и ожидаемых mechanisms.
@@ -653,7 +669,7 @@
 - Уже пройденные practice sessions видны в read-only `/history` с деталями ответов; session outcomes уже имеют SQLite/repository storage foundation, создаются автоматически для completed sessions с ответами и показываются на TUI ended screen и через `/finish-session`, но пока не показываются в history/CLI.
 - AI-объяснения из learning mode и named manual notes уже доступны через `/notebook`; topic/subtopic/competency filters подключены, но edit/delete flow для named manual notes пока нет.
 - System Design Mock Interview сохраняет transcript, design artifact sections, промежуточные `/sd-checkpoint` и `/sd-pressure` как interviewer transcript messages, итоговый feedback artifact, seeded system design rubric dimensions и structured rubric evaluation после `/sd-feedback`; TUI history показывает final feedback и rubric scores через `/history system-design`, а CLI `system-design-history` показывает saved scenarios, transcript, artifacts, feedback и rubric scores.
-- Вопросная база сейчас недостаточно curated: `infra/seed.py` остается минимальным bootstrap/fallback, generated accepted questions могут быть слишком общими, а first-run flow не гарантирует базовый набор частых interview questions. План исправления вынесен в `## Next` / `0A`.
+- Вопросная база теперь имеет first-run `canonical-2026` pack на 40 accepted must-know questions; generated accepted questions все еще могут быть слишком общими, поэтому quality gate, canonical priority в practice и curation observability остаются в `## Next` / `0A`.
 - Generated curriculum structure из `generate-seed` сохраняется идемпотентно: topics переиспользуются по `slug`/`source`, subtopics — по parent/`slug`/`source`, objectives — по scope/text/source.
 - Generated questions/materials/scenarios уже сохраняются; generated questions проходят консервативный same-topic duplicate check и pending review через CLI/TUI. Background generated questions уже получают автопривязку tags/known competencies из LLM metadata, но ручной review пока остается обязательным для approve вместо automated-by-default curation.
 - TUI `/materials` уже показывает generated artifacts, версии artifacts внутри темы, latest/конкретный выбор, preview полного artifact без входа в другой режим, выбрать сохраненный material/scenario, фильтровать learning materials и system design scenarios по текущему контексту или всем темам, а также архивировать неудачные learning materials и system design scenarios через `/archive-material <id> confirm [reason]` и `/archive-scenario <id> confirm [reason]`.

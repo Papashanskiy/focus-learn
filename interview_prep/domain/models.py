@@ -246,6 +246,28 @@ class QuestionSourceSnapshot:
 
 
 @dataclass(frozen=True)
+class QuestionAutoCurationAudit:
+    id: int | None
+    question_id: int
+    previous_status: str
+    decision: str
+    resulting_status: str
+    confidence: float
+    rationale: str
+    quality_flags: list[str]
+    curator_model: str
+    curator_version: str
+    source_url: str | None
+    source_retrieved_at: datetime | None
+    source_category_hints: list[str]
+    source_frequency_hint: str | None
+    created_at: datetime
+    duplicate_of_id: int | None = None
+    curator_score: int | None = None
+    curator_source_evidence: str | None = None
+
+
+@dataclass(frozen=True)
 class LearningMaterial:
     id: int | None
     topic_id: int

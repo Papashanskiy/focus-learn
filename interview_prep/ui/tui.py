@@ -21,7 +21,11 @@ from interview_prep.domain.models import (
     LearningMaterial,
     ManualNote,
     NotebookEntry,
+    QUESTION_SOURCE_QUALITY_ACCEPTED,
+    QUESTION_SOURCE_QUALITY_ARCHIVED,
+    QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
     Question,
+    QuestionAutoCurationAudit,
     Session,
     SystemDesignArtifact,
     SystemDesignFeedbackArtifact,
@@ -133,6 +137,7 @@ Mode = Literal[
     "artifacts",
     "content",
     "questions_review",
+    "auto_curation_audit",
     "history",
     "notebook",
     "readiness",
@@ -332,6 +337,10 @@ class InterviewPrepTUI(App[None]):
         self.artifacts_return_mode: Mode = "answering"
         self.content_return_mode: Mode = "answering"
         self.questions_review_return_mode: Mode = "answering"
+        self.auto_curation_audit_return_mode: Mode = "answering"
+        self.auto_curation_audit_question_filter: int | None = None
+        self.auto_curation_audit_topic_filter: int | None = None
+        self.auto_curation_audit_status_filter: str | None = None
         self.history_return_mode: Mode = "answering"
         self.notebook_return_mode: Mode = "answering"
         self.readiness_return_mode: Mode = "answering"
@@ -510,6 +519,13 @@ class InterviewPrepTUI(App[None]):
             self.add_history(
                 "Questions review read-only. Используй /questions-review accept <id>, "
                 "/questions-review archive <id> или /practice."
+            )
+            self.render_all()
+            return
+        if self.mode == "auto_curation_audit":
+            self.add_history(
+                "Auto-curation audit read-only. Используй /curation-audit topic <id>, "
+                "/curation-audit status <status>, /curation-audit question <id> или /practice."
             )
             self.render_all()
             return
@@ -812,6 +828,14 @@ class InterviewPrepTUI(App[None]):
             self.enter_questions_review()
         elif command.startswith("/questions-review "):
             self.questions_review_command(command.removeprefix("/questions-review").strip())
+        elif command == "/curation-audit":
+            self.enter_auto_curation_audit()
+        elif command.startswith("/curation-audit "):
+            self.enter_auto_curation_audit(command.removeprefix("/curation-audit").strip())
+        elif command == "/questions-source audit":
+            self.enter_auto_curation_audit()
+        elif command.startswith("/questions-source audit "):
+            self.enter_auto_curation_audit(command.removeprefix("/questions-source audit").strip())
         elif command == "/history":
             self.enter_history()
         elif command.startswith("/history "):
@@ -1103,6 +1127,83 @@ class InterviewPrepTUI(App[None]):
         if self.mode == "select_topic" and self.session is not None:
             self.mode = "answering"
         self.add_history("Возврат из questions review.")
+        self.render_all()
+
+    def enter_auto_curation_audit(self, selection: str = "") -> None:
+        try:
+            self.apply_auto_curation_audit_filters(selection)
+        except ValueError as exc:
+            self.add_history(str(exc))
+            self.render_all()
+            return
+        self.open_auto_curation_audit_screen()
+        self.add_history("Открыт auto-curation audit.")
+        self.render_all()
+
+    def apply_auto_curation_audit_filters(self, selection: str) -> None:
+        args = selection.strip()
+        if not args or args in {"list", "all"}:
+            self.auto_curation_audit_question_filter = None
+            self.auto_curation_audit_topic_filter = None
+            self.auto_curation_audit_status_filter = None
+            return
+        parts = args.split()
+        question_id: int | None = None
+        topic_id: int | None = None
+        status: str | None = None
+        index = 0
+        while index < len(parts):
+            key = parts[index].removeprefix("--")
+            if key not in {"question", "topic", "status"} or index + 1 >= len(parts):
+                raise ValueError(
+                    "Использование: /curation-audit [question <id>] [topic <id>] "
+                    "[status accepted|archived|pending_auto_review]."
+                )
+            value = parts[index + 1]
+            if key in {"question", "topic"}:
+                try:
+                    numeric_value = int(value)
+                except ValueError as exc:
+                    raise ValueError(f"Auto-curation audit принимает numeric {key} id.") from exc
+                if numeric_value < 1:
+                    raise ValueError(f"Auto-curation audit принимает positive {key} id.")
+                if key == "question":
+                    question_id = numeric_value
+                else:
+                    topic_id = numeric_value
+            else:
+                if value not in {
+                    QUESTION_SOURCE_QUALITY_ACCEPTED,
+                    QUESTION_SOURCE_QUALITY_ARCHIVED,
+                    QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                }:
+                    raise ValueError(
+                        "status должен быть accepted, archived или pending_auto_review."
+                    )
+                status = value
+            index += 2
+        self.auto_curation_audit_question_filter = question_id
+        self.auto_curation_audit_topic_filter = topic_id
+        self.auto_curation_audit_status_filter = status
+
+    def open_auto_curation_audit_screen(self) -> None:
+        if self.mode != "auto_curation_audit":
+            self.auto_curation_audit_return_mode = self.mode
+        self.mode = "auto_curation_audit"
+        self.command_palette_visible = False
+        self.last_feedback = "Read-only audit auto-curation decisions."
+
+    def exit_auto_curation_audit(self) -> None:
+        if self.mode != "auto_curation_audit":
+            return
+        self.mode = (
+            self.auto_curation_audit_return_mode
+            if self.auto_curation_audit_return_mode != "auto_curation_audit"
+            else "answering"
+        )
+        if self.mode == "select_topic" and self.session is not None:
+            self.mode = "answering"
+        self.add_history("Возврат из auto-curation audit.")
         self.render_all()
 
     def enter_notebook(self, selection: str = "") -> None:
@@ -2689,6 +2790,9 @@ class InterviewPrepTUI(App[None]):
         if self.mode == "questions_review":
             self.exit_questions_review()
             return
+        if self.mode == "auto_curation_audit":
+            self.exit_auto_curation_audit()
+            return
         if self.mode == "artifacts":
             self.exit_artifacts()
             return
@@ -3092,6 +3196,8 @@ class InterviewPrepTUI(App[None]):
             return True
         if self.mode == "questions_review":
             return True
+        if self.mode == "auto_curation_audit":
+            return True
         if self.mode == "artifacts":
             return True
         if self.mode == "history":
@@ -3116,6 +3222,7 @@ class InterviewPrepTUI(App[None]):
         return self.mode in {
             "content",
             "questions_review",
+            "auto_curation_audit",
             "artifacts",
             "history",
             "notebook",
@@ -3146,6 +3253,8 @@ class InterviewPrepTUI(App[None]):
             question = "history"
         if self.mode == "questions_review":
             question = "questions review"
+        if self.mode == "auto_curation_audit":
+            question = "curation audit"
         if self.mode == "notebook":
             question = "notebook"
         if self.mode == "readiness":
@@ -3259,6 +3368,8 @@ class InterviewPrepTUI(App[None]):
             return self.content_jobs_text()
         if self.mode == "questions_review":
             return self.questions_review_text()
+        if self.mode == "auto_curation_audit":
+            return self.auto_curation_audit_text()
         if self.mode == "history":
             return self.history_browser_text()
         if self.mode == "notebook":
@@ -4191,6 +4302,8 @@ class InterviewPrepTUI(App[None]):
             return self.content_jobs_side_panel_text()
         if self.mode == "questions_review":
             return self.questions_review_side_panel_text()
+        if self.mode == "auto_curation_audit":
+            return self.auto_curation_audit_side_panel_text()
         if self.mode == "artifacts":
             return self.materials_side_panel_text()
         if self.mode == "history":
@@ -4428,6 +4541,133 @@ class InterviewPrepTUI(App[None]):
             "/questions-review",
             "/questions-review accept <id>",
             "/questions-review archive <id>",
+            "/practice",
+            "",
+            "[bold]Последние события[/bold]",
+        ]
+        lines.extend(self.history[-8:] or ["Пока нет событий."])
+        if self.command_palette_visible or self.last_feedback.startswith("Статистика:"):
+            lines.extend(["", "[bold]Панель[/bold]", self.last_feedback])
+        return "\n".join(lines)
+
+    def auto_curation_audit_rows(self, limit: int = 20) -> list[QuestionAutoCurationAudit]:
+        return self.services.repository.list_question_auto_curation_audits(
+            question_id=self.auto_curation_audit_question_filter,
+            topic_id=self.auto_curation_audit_topic_filter,
+            resulting_status=self.auto_curation_audit_status_filter,
+            limit=limit,
+        )
+
+    def auto_curation_audit_filter_text(self) -> str:
+        filters = []
+        if self.auto_curation_audit_question_filter is not None:
+            filters.append(f"question #{self.auto_curation_audit_question_filter}")
+        if self.auto_curation_audit_topic_filter is not None:
+            filters.append(f"topic #{self.auto_curation_audit_topic_filter}")
+        if self.auto_curation_audit_status_filter is not None:
+            filters.append(f"status {self.auto_curation_audit_status_filter}")
+        return ", ".join(filters) if filters else "all decisions"
+
+    def auto_curation_audit_text(self) -> str:
+        try:
+            audits = self.auto_curation_audit_rows(limit=20)
+        except ValueError as exc:
+            return f"[bold red]Auto-curation audit error[/bold red]\n\n{escape(str(exc))}"
+        topics = {topic.id: topic.title for topic in self.services.questions.list_topics()}
+        lines = [
+            "[bold cyan]Auto-curation audit[/bold cyan]",
+            "",
+            "Read-only список решений source-backed auto-curation.",
+            f"[bold]Фильтр[/bold]: {escape(self.auto_curation_audit_filter_text())}",
+            "",
+            "[bold]Команды[/bold]",
+            "/curation-audit - все последние decisions.",
+            "/curation-audit topic <id> - фильтр по теме.",
+            "/curation-audit question <id> - фильтр по вопросу.",
+            "/curation-audit status <accepted|archived|pending_auto_review> - фильтр по итоговому статусу.",
+            "/questions-source audit ... - alias для этого экрана.",
+            "CLI: questions-source undo [--question <id>] - откатить последний decision без удаления audit row.",
+            "/practice - вернуться назад.",
+            "",
+            f"[bold]Auto-curation decisions[/bold]: {len(audits)}",
+        ]
+        if not audits:
+            lines.append("- сохраненные auto-curation decisions не найдены")
+            return "\n".join(lines)
+        for audit in audits:
+            question = self.services.repository.get_question(audit.question_id)
+            topic_title = topics.get(question.topic_id) if question else None
+            lines.append("")
+            lines.append(self.auto_curation_audit_item_text(audit, question, topic_title))
+        return "\n".join(lines)
+
+    def auto_curation_audit_item_text(
+        self,
+        audit: QuestionAutoCurationAudit,
+        question: Question | None,
+        topic_title: str | None,
+    ) -> str:
+        current_status = question.source_quality_status if question else "missing"
+        topic_label = topic_title or (f"topic #{question.topic_id}" if question else "unknown")
+        prompt = one_line_preview(question.prompt if question else "question row is unavailable", limit=180)
+        retrieved_at = audit.source_retrieved_at.isoformat(timespec="minutes") if audit.source_retrieved_at else "unknown"
+        lines = [
+            (
+                f"- #{audit.id or '-'} question=#{audit.question_id} {escape(topic_label)} "
+                f"decision={escape(audit.decision)} confidence={audit.confidence:.2f}"
+            ),
+            f"  Status: {escape(audit.previous_status)} -> {escape(audit.resulting_status)} current={escape(current_status)}",
+            f"  Curator: {escape(audit.curator_model)} version={escape(audit.curator_version)} score={audit.curator_score or '-'}",
+            f"  Source: {escape(audit.source_url or '-')} retrieved_at={escape(retrieved_at)}",
+            f"  Category hints: {escape(', '.join(audit.source_category_hints) or '-')}",
+            f"  Frequency: {escape(audit.source_frequency_hint or '-')}",
+            f"  Quality flags: {escape(', '.join(audit.quality_flags) or '-')}",
+            f"  Source evidence: {escape(audit.curator_source_evidence or '-')}",
+            f"  Rationale: {escape(audit.rationale)}",
+            f"  Prompt: {escape(prompt)}",
+        ]
+        if audit.duplicate_of_id is not None:
+            lines.insert(2, f"  Duplicate of: #{audit.duplicate_of_id}")
+        return "\n".join(lines)
+
+    def auto_curation_audit_side_panel_text(self) -> str:
+        audits = self.auto_curation_audit_rows(limit=100)
+        accepted = sum(1 for audit in audits if audit.resulting_status == QUESTION_SOURCE_QUALITY_ACCEPTED)
+        archived = sum(1 for audit in audits if audit.resulting_status == QUESTION_SOURCE_QUALITY_ARCHIVED)
+        quarantined = sum(
+            1 for audit in audits if audit.resulting_status == QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW
+        )
+        topic_count = len(
+            {
+                question.topic_id
+                for question in (
+                    self.services.repository.get_question(audit.question_id) for audit in audits
+                )
+                if question is not None
+            }
+        )
+        lines = [
+            "[bold]Auto-curation audit[/bold]",
+            "",
+            "[bold]Следующее действие[/bold]",
+            "Проверь автоматические decisions и при необходимости откати последний через CLI undo.",
+            "",
+            "[bold]Фильтр[/bold]",
+            self.auto_curation_audit_filter_text(),
+            "",
+            "[bold]Сводка[/bold]",
+            f"Decisions: {len(audits)}",
+            f"Accepted: {accepted}",
+            f"Archived: {archived}",
+            f"Quarantined: {quarantined}",
+            f"Тем в audit: {topic_count}",
+            "",
+            "[bold]Команды[/bold]",
+            "/curation-audit",
+            "/curation-audit topic <id>",
+            "/curation-audit question <id>",
+            "/curation-audit status accepted",
+            "CLI: questions-source undo --question <id>",
             "/practice",
             "",
             "[bold]Последние события[/bold]",
@@ -5080,6 +5320,8 @@ class InterviewPrepTUI(App[None]):
             return "/pause-content, /resume-content, /retry-job <id>, /materials artifacts, /practice назад"
         if self.mode == "questions_review":
             return "/questions-review accept <id>, /questions-review archive <id>, /practice назад"
+        if self.mode == "auto_curation_audit":
+            return "/curation-audit topic <id>, /curation-audit status <status>, /practice назад"
         if self.mode == "history":
             return "/practice назад к текущему workflow"
         if self.mode == "notebook":

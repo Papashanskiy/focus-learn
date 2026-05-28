@@ -115,6 +115,8 @@ python -m interview_prep questions-source refresh --dry-run
 python -m interview_prep questions-source candidates
 python -m interview_prep questions-source auto-curate --dry-run
 python -m interview_prep questions-source auto-curate
+python -m interview_prep questions-source audit --status accepted
+python -m interview_prep questions-source undo --question 42
 python -m interview_prep questions-review
 python -m interview_prep questions-review accept 42
 python -m interview_prep questions-review archive 42
@@ -128,7 +130,11 @@ python -m interview_prep questions-review archive 42
 
 `questions-source candidates` преобразует сохраненные source snapshots в собственные source-backed candidate questions со статусом `pending_auto_review`, `source_url`, `source_retrieved_at`, category hints и frequency hint. Эти вопросы не попадают в practice loop, пока auto-curation не переведет high-confidence rows в `accepted`; `--dry-run` показывает candidates без записи.
 
-`questions-source auto-curate --dry-run` классифицирует pending source-backed candidates как `auto_accepted`, `auto_archived` или `quarantined` по deterministic gates и показывает confidence, quality flags, rationale и source evidence без изменения SQLite. Запуск без `--dry-run` применяет deterministic decisions: `auto_accepted` переводит в `accepted`, `auto_archived` переводит в `archived`, а `quarantined` остается `pending_auto_review` вне practice до будущего audit/undo surface. Опционально `--llm-curator` прогоняет quarantined candidates через strict JSON LLM rubric перед применением статусов; невалидный или low-confidence ответ безопасно оставляет вопрос в quarantine.
+`questions-source auto-curate --dry-run` классифицирует pending source-backed candidates как `auto_accepted`, `auto_archived` или `quarantined` по deterministic gates и показывает confidence, quality flags, rationale и source evidence без изменения SQLite. Запуск без `--dry-run` применяет deterministic decisions: `auto_accepted` переводит в `accepted`, `auto_archived` переводит в `archived`, а `quarantined` остается `pending_auto_review` вне practice до audit/undo flow. Опционально `--llm-curator` прогоняет quarantined candidates через strict JSON LLM rubric перед применением статусов; невалидный или low-confidence ответ безопасно оставляет вопрос в quarantine.
+
+`questions-source audit [--question <id>] [--topic <id>] [--status accepted|archived|pending_auto_review]` read-only показывает сохраненные auto-curation decisions: previous/resulting/current status, source metadata/evidence, quality flags, curator model/version и rationale.
+
+`questions-source undo [--question <id>]` безопасно откатывает последний matching auto-curation decision: команда восстанавливает previous status только если текущий status вопроса все еще равен audited resulting status. Audit row остается в SQLite для истории; если вопрос уже изменился вручную или другим decision, undo откажется перезаписывать status.
 
 `questions-review` показывает generated questions со статусом `pending_review`. Команда `accept` переводит вопрос в `accepted`, а `archive` скрывает слабый generated question из будущего practice loop без удаления строки из SQLite.
 

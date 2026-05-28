@@ -22,6 +22,7 @@ from interview_prep.domain.models import (
     PracticeSessionAnswerDetail,
     PracticeSessionSummary,
     Question,
+    QuestionAutoCurationAudit,
     QuestionCompetencyLink,
     QuestionSourceSnapshot,
     QUESTION_SOURCE_QUALITY_STATUSES,
@@ -41,10 +42,11 @@ from interview_prep.domain.models import (
     Topic,
 )
 from interview_prep.infra.seed import (
-    BOOTSTRAP_QUESTIONS,
     BOOTSTRAP_TOPICS,
     RUBRIC_DIMENSIONS,
     SENIOR_COMPETENCIES,
+    SeedQuestion,
+    SEED_QUESTIONS,
     SYSTEM_DESIGN_RUBRIC_DIMENSIONS,
 )
 
@@ -95,6 +97,30 @@ def _question_source_snapshot(row: sqlite3.Row) -> QuestionSourceSnapshot:
         retrieved_at=_dt(row["retrieved_at"]),
         checksum=row["checksum"],
         category_hints=_json_string_list(row["category_hints_json"]),
+        created_at=_dt(row["created_at"]),
+    )
+
+
+def _question_auto_curation_audit(row: sqlite3.Row) -> QuestionAutoCurationAudit:
+    source_retrieved_at = row["source_retrieved_at"]
+    return QuestionAutoCurationAudit(
+        id=row["id"],
+        question_id=row["question_id"],
+        previous_status=row["previous_status"],
+        decision=row["decision"],
+        resulting_status=row["resulting_status"],
+        confidence=float(row["confidence"]),
+        curator_score=row["curator_score"],
+        rationale=row["rationale"],
+        quality_flags=_json_string_list(row["quality_flags_json"]),
+        duplicate_of_id=row["duplicate_of_id"],
+        curator_source_evidence=row["curator_source_evidence"],
+        curator_model=row["curator_model"],
+        curator_version=row["curator_version"],
+        source_url=row["source_url"],
+        source_retrieved_at=_dt(source_retrieved_at) if source_retrieved_at else None,
+        source_category_hints=_json_string_list(row["source_category_hints_json"]),
+        source_frequency_hint=row["source_frequency_hint"],
         created_at=_dt(row["created_at"]),
     )
 
@@ -540,68 +566,116 @@ class SQLiteRepository:
                 row["slug"]: row["id"]
                 for row in self.connection.execute("SELECT id, slug FROM competencies")
             }
-            existing_questions = self.connection.execute("SELECT COUNT(*) AS c FROM questions").fetchone()["c"]
-            if existing_questions:
-                for question in BOOTSTRAP_QUESTIONS:
-                    self.connection.execute(
-                        """
-                        UPDATE questions
-                        SET prompt = ?, hint = ?, reference_answer = ?
-                        WHERE topic_id = ? AND difficulty = ? AND source = 'bootstrap'
-                        """,
-                        (
-                            question.prompt,
-                            question.hint,
-                            question.reference_answer,
-                            topic_ids[question.topic_slug],
-                            question.difficulty,
-                        ),
-                    )
-                self._seed_bootstrap_question_competencies(topic_ids, competency_ids)
-                return
 
-            for question in BOOTSTRAP_QUESTIONS:
-                self.connection.execute(
-                    """
-                    INSERT INTO questions (topic_id, difficulty, prompt, hint, reference_answer, source)
-                    VALUES (?, ?, ?, ?, ?, 'bootstrap')
-                    """,
-                    (
-                        topic_ids[question.topic_slug],
-                        question.difficulty,
-                        question.prompt,
-                        question.hint,
-                        question.reference_answer,
-                    ),
+            for question in SEED_QUESTIONS:
+                self._upsert_seed_question(question, topic_ids)
+            self._seed_question_competencies(SEED_QUESTIONS, topic_ids, competency_ids)
+
+    def _upsert_seed_question(self, question: SeedQuestion, topic_ids: dict[str, int]) -> int:
+        topic_id = topic_ids.get(question.topic_slug)
+        if topic_id is None:
+            raise RuntimeError(f"Unknown seed topic slug: {question.topic_slug}")
+        existing_id = self._find_seed_question_id(question, topic_id)
+        category_hints_json = json.dumps(list(question.source_category_hints), ensure_ascii=False)
+        if existing_id is not None:
+            self.connection.execute(
+                """
+                UPDATE questions
+                SET
+                    difficulty = ?,
+                    prompt = ?,
+                    hint = ?,
+                    reference_answer = ?,
+                    source_category_hints_json = ?,
+                    source_frequency_hint = ?
+                WHERE id = ?
+                """,
+                (
+                    question.difficulty,
+                    question.prompt,
+                    question.hint,
+                    question.reference_answer,
+                    category_hints_json,
+                    question.source_frequency_hint,
+                    existing_id,
+                ),
+            )
+            return existing_id
+
+        cursor = self.connection.execute(
+            """
+            INSERT INTO questions
+                (
+                    topic_id,
+                    difficulty,
+                    prompt,
+                    hint,
+                    reference_answer,
+                    source,
+                    source_quality_status,
+                    source_category_hints_json,
+                    source_frequency_hint
                 )
-            self._seed_bootstrap_question_competencies(topic_ids, competency_ids)
+            VALUES (?, ?, ?, ?, ?, ?, 'accepted', ?, ?)
+            """,
+            (
+                topic_id,
+                question.difficulty,
+                question.prompt,
+                question.hint,
+                question.reference_answer,
+                question.source,
+                category_hints_json,
+                question.source_frequency_hint,
+            ),
+        )
+        return int(cursor.lastrowid)
 
-    def _seed_bootstrap_question_competencies(
+    def _find_seed_question_id(self, question: SeedQuestion, topic_id: int) -> int | None:
+        if question.source == "bootstrap":
+            row = self.connection.execute(
+                """
+                SELECT id
+                FROM questions
+                WHERE topic_id = ? AND difficulty = ? AND source = ?
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (topic_id, question.difficulty, question.source),
+            ).fetchone()
+        else:
+            row = self.connection.execute(
+                """
+                SELECT id
+                FROM questions
+                WHERE topic_id = ? AND source = ? AND prompt = ?
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (topic_id, question.source, question.prompt),
+            ).fetchone()
+        return int(row["id"]) if row else None
+
+    def _seed_question_competencies(
         self,
+        questions: Sequence[SeedQuestion],
         topic_ids: dict[str, int],
         competency_ids: dict[str, int],
     ) -> None:
-        for question in BOOTSTRAP_QUESTIONS:
+        for question in questions:
             if not question.competency_links:
                 continue
             primary_count = sum(1 for link in question.competency_links if link.is_primary)
             if primary_count > 1:
-                raise RuntimeError(f"Bootstrap question has multiple primary competencies: {question.topic_slug}")
+                raise RuntimeError(f"Seed question has multiple primary competencies: {question.topic_slug}")
 
-            question_row = self.connection.execute(
-                """
-                SELECT id
-                FROM questions
-                WHERE topic_id = ? AND difficulty = ? AND source = 'bootstrap'
-                ORDER BY id ASC
-                LIMIT 1
-                """,
-                (topic_ids[question.topic_slug], question.difficulty),
-            ).fetchone()
-            if question_row is None:
+            topic_id = topic_ids.get(question.topic_slug)
+            if topic_id is None:
+                raise RuntimeError(f"Unknown seed topic slug: {question.topic_slug}")
+            question_id = self._find_seed_question_id(question, topic_id)
+            if question_id is None:
                 continue
 
-            question_id = question_row["id"]
             existing_links = self.connection.execute(
                 """
                 SELECT COUNT(*) AS c
@@ -1228,6 +1302,149 @@ class SQLiteRepository:
             """
         ).fetchall()
         return [_question_source_snapshot(row) for row in rows]
+
+    def add_question_auto_curation_audit(
+        self,
+        audit: QuestionAutoCurationAudit,
+    ) -> QuestionAutoCurationAudit:
+        with self.connection:
+            cursor = self.connection.execute(
+                """
+                INSERT INTO question_auto_curation_audits
+                    (
+                        question_id,
+                        previous_status,
+                        decision,
+                        resulting_status,
+                        confidence,
+                        curator_score,
+                        rationale,
+                        quality_flags_json,
+                        duplicate_of_id,
+                        curator_source_evidence,
+                        curator_model,
+                        curator_version,
+                        source_url,
+                        source_retrieved_at,
+                        source_category_hints_json,
+                        source_frequency_hint,
+                        created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    audit.question_id,
+                    audit.previous_status,
+                    audit.decision,
+                    audit.resulting_status,
+                    audit.confidence,
+                    audit.curator_score,
+                    audit.rationale,
+                    json.dumps(audit.quality_flags, ensure_ascii=False),
+                    audit.duplicate_of_id,
+                    audit.curator_source_evidence,
+                    audit.curator_model,
+                    audit.curator_version,
+                    audit.source_url,
+                    audit.source_retrieved_at.isoformat(timespec="seconds")
+                    if audit.source_retrieved_at
+                    else None,
+                    json.dumps(audit.source_category_hints, ensure_ascii=False),
+                    audit.source_frequency_hint,
+                    audit.created_at.isoformat(timespec="seconds"),
+                ),
+            )
+        saved = self.get_question_auto_curation_audit(cursor.lastrowid)
+        if saved is None:
+            raise RuntimeError("Question auto-curation audit was not saved.")
+        return saved
+
+    def get_question_auto_curation_audit(self, audit_id: int) -> QuestionAutoCurationAudit | None:
+        row = self.connection.execute(
+            """
+            SELECT
+                id,
+                question_id,
+                previous_status,
+                decision,
+                resulting_status,
+                confidence,
+                curator_score,
+                rationale,
+                quality_flags_json,
+                duplicate_of_id,
+                curator_source_evidence,
+                curator_model,
+                curator_version,
+                source_url,
+                source_retrieved_at,
+                source_category_hints_json,
+                source_frequency_hint,
+                created_at
+            FROM question_auto_curation_audits
+            WHERE id = ?
+            """,
+            (audit_id,),
+        ).fetchone()
+        return _question_auto_curation_audit(row) if row else None
+
+    def list_question_auto_curation_audits(
+        self,
+        question_id: int | None = None,
+        *,
+        topic_id: int | None = None,
+        resulting_status: str | None = None,
+        limit: int | None = None,
+    ) -> list[QuestionAutoCurationAudit]:
+        conditions = []
+        params: list[object] = []
+        if question_id is not None:
+            conditions.append("a.question_id = ?")
+            params.append(question_id)
+        if topic_id is not None:
+            conditions.append("q.topic_id = ?")
+            params.append(topic_id)
+        if resulting_status is not None:
+            self._validate_question_source_quality_status(resulting_status)
+            conditions.append("a.resulting_status = ?")
+            params.append(resulting_status)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        limit_sql = ""
+        if limit is not None:
+            if limit < 1:
+                raise ValueError("limit must be positive")
+            limit_sql = "LIMIT ?"
+            params.append(limit)
+        rows = self.connection.execute(
+            f"""
+            SELECT
+                a.id,
+                a.question_id,
+                a.previous_status,
+                a.decision,
+                a.resulting_status,
+                a.confidence,
+                a.curator_score,
+                a.rationale,
+                a.quality_flags_json,
+                a.duplicate_of_id,
+                a.curator_source_evidence,
+                a.curator_model,
+                a.curator_version,
+                a.source_url,
+                a.source_retrieved_at,
+                a.source_category_hints_json,
+                a.source_frequency_hint,
+                a.created_at
+            FROM question_auto_curation_audits a
+            JOIN questions q ON q.id = a.question_id
+            {where}
+            ORDER BY a.created_at DESC, a.id DESC
+            {limit_sql}
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_question_auto_curation_audit(row) for row in rows]
 
     def upsert_tag(self, tag: Tag) -> Tag:
         with self.connection:

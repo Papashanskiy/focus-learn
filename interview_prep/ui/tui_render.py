@@ -558,6 +558,10 @@ def command_palette_text() -> str:
                 "/questions-review список pending generated questions",
                 "/questions-review accept <id> принять generated question",
                 "/questions-review archive <id> архивировать generated question",
+                "/curation-audit список решений source-backed auto-curation",
+                "/curation-audit topic <id> фильтр audit decisions по теме",
+                "/curation-audit status <status> фильтр audit decisions по итоговому статусу",
+                "CLI: questions-source undo --question <id> откат последнего decision",
             ],
         ),
         (

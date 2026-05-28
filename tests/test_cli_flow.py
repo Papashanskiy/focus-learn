@@ -1086,6 +1086,204 @@ class CLIFlowTests(unittest.TestCase):
         self.assertEqual(saved_generic.source_quality_status, QUESTION_SOURCE_QUALITY_ARCHIVED)
         self.assertEqual(saved_missing_metadata.source_quality_status, QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW)
 
+    def test_questions_source_auto_curation_audit_lists_saved_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "questions_source_auto_curation_audit.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            topic = repository.find_topic_by_slug("async-backend")
+            self.assertIsNotNone(topic)
+            assert topic is not None
+            retrieved_at = datetime(2026, 5, 27, 9, 0, 0)
+            good = repository.add_question(
+                Question(
+                    id=None,
+                    topic_id=topic.id or 0,
+                    difficulty="senior",
+                    prompt=(
+                        "Async webhook worker получает burst событий и downstream API отвечает timeout. "
+                        "Как ты задашь bounded concurrency, idempotency и queue lag alerts?"
+                    ),
+                    hint="Apply should accept this high-confidence candidate.",
+                    reference_answer="Нужны bounded queue, idempotency key, retry budget и lag metrics.",
+                    source="source-backed",
+                    source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                    source_url="https://docs.python.org/3/library/asyncio.html",
+                    source_retrieved_at=retrieved_at,
+                    source_category_hints=("async", "queues"),
+                    source_frequency_hint="official-docs:common-async-production",
+                )
+            )
+            generic = repository.add_question(
+                Question(
+                    id=None,
+                    topic_id=topic.id or 0,
+                    difficulty="senior",
+                    prompt="Разбери ключевой production-риск в backend-flow и какие tradeoffs важны?",
+                    hint="Apply should archive this generic candidate.",
+                    reference_answer="Generic candidate.",
+                    source="source-backed",
+                    source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                    source_url="https://example.test/source",
+                    source_retrieved_at=retrieved_at,
+                    source_category_hints=("async",),
+                    source_frequency_hint="interview-coverage:generic",
+                )
+            )
+            repository.close()
+
+            apply_process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "questions-source",
+                    "auto-curate",
+                    "--topic",
+                    str(topic.id),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            audit_process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "questions-source",
+                    "audit",
+                    "--topic",
+                    str(topic.id),
+                    "--status",
+                    QUESTION_SOURCE_QUALITY_ACCEPTED,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+            connection = connect(db_path)
+            repository = SQLiteRepository(connection)
+            saved_good = repository.get_question(good.id or 0)
+            saved_generic = repository.get_question(generic.id or 0)
+            repository.close()
+
+        self.assertEqual(apply_process.returncode, 0, apply_process.stderr)
+        self.assertEqual(audit_process.returncode, 0, audit_process.stderr)
+        self.assertIn(
+            f"Question source auto-curation audit for topic #{topic.id}, status accepted: 1 decision",
+            audit_process.stdout,
+        )
+        self.assertIn(f"question=#{good.id} topic={topic.title} decision=auto_accepted", audit_process.stdout)
+        self.assertIn("status=pending_auto_review -> accepted current=accepted", audit_process.stdout)
+        self.assertIn("curator=deterministic-gates", audit_process.stdout)
+        self.assertIn("url=https://docs.python.org/3/library/asyncio.html", audit_process.stdout)
+        self.assertIn("category_hints=async, queues", audit_process.stdout)
+        self.assertIn("frequency_hint=official-docs:common-async-production", audit_process.stdout)
+        self.assertIn("quality_flags=-", audit_process.stdout)
+        self.assertIn("source_evidence=-", audit_process.stdout)
+        self.assertIn("rationale=Source-backed candidate has source URL", audit_process.stdout)
+        self.assertNotIn(f"question=#{generic.id}", audit_process.stdout)
+        self.assertIsNotNone(saved_good)
+        self.assertIsNotNone(saved_generic)
+        assert saved_good is not None
+        assert saved_generic is not None
+        self.assertEqual(saved_good.source_quality_status, QUESTION_SOURCE_QUALITY_ACCEPTED)
+        self.assertEqual(saved_generic.source_quality_status, QUESTION_SOURCE_QUALITY_ARCHIVED)
+
+    def test_questions_source_auto_curation_undo_restores_previous_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "questions_source_auto_curation_undo.db"
+            connection = connect(db_path)
+            init_db(connection)
+            repository = SQLiteRepository(connection)
+            repository.seed_defaults()
+            topic = repository.find_topic_by_slug("async-backend")
+            self.assertIsNotNone(topic)
+            assert topic is not None
+            retrieved_at = datetime(2026, 5, 27, 9, 0, 0)
+            question = repository.add_question(
+                Question(
+                    id=None,
+                    topic_id=topic.id or 0,
+                    difficulty="senior",
+                    prompt=(
+                        "Async webhook worker получает burst событий и downstream API отвечает timeout. "
+                        "Как ты задашь bounded concurrency, idempotency и queue lag alerts?"
+                    ),
+                    hint="Apply should accept this high-confidence candidate.",
+                    reference_answer="Нужны bounded queue, idempotency key, retry budget и lag metrics.",
+                    source="source-backed",
+                    source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+                    source_url="https://docs.python.org/3/library/asyncio.html",
+                    source_retrieved_at=retrieved_at,
+                    source_category_hints=("async", "queues"),
+                    source_frequency_hint="official-docs:common-async-production",
+                )
+            )
+            repository.close()
+
+            apply_process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "questions-source",
+                    "auto-curate",
+                    "--topic",
+                    str(topic.id),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            undo_process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "questions-source",
+                    "undo",
+                    "--question",
+                    str(question.id),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+            connection = connect(db_path)
+            repository = SQLiteRepository(connection)
+            saved_question = repository.get_question(question.id or 0)
+            audits = repository.list_question_auto_curation_audits(question_id=question.id)
+            repository.close()
+
+        self.assertEqual(apply_process.returncode, 0, apply_process.stderr)
+        self.assertEqual(undo_process.returncode, 0, undo_process.stderr)
+        self.assertIn("Question source auto-curation undo: audit #", undo_process.stdout)
+        self.assertIn(f"question #{question.id}", undo_process.stdout)
+        self.assertIn("status=accepted -> pending_auto_review", undo_process.stdout)
+        self.assertIn("audit_row=kept", undo_process.stdout)
+        self.assertIsNotNone(saved_question)
+        assert saved_question is not None
+        self.assertEqual(saved_question.source_quality_status, QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW)
+        self.assertEqual(len(audits), 1)
+
     def test_evaluations_command_shows_saved_rubric_evaluation_for_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "evaluations.db"
