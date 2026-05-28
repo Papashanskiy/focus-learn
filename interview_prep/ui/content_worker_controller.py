@@ -113,12 +113,22 @@ class ContentWorkerOrchestrator:
         if not results:
             status = "idle"
             history_message = "Автогенерация контента: задач в очереди нет."
-        elif any(item.job.status == "failed" for item in results):
-            status = "failed"
-            history_message = None
         else:
-            status = f"done {len(results)} job(s)"
-            history_message = None
+            done_count = sum(1 for item in results if item.job.status == "done")
+            retry_count = sum(1 for item in results if item.job.status == "queued")
+            failed_count = sum(1 for item in results if item.job.status == "failed")
+            if failed_count:
+                status = "failed"
+                history_message = None
+            elif retry_count and done_count:
+                status = f"done {done_count} job(s), retry scheduled {retry_count} job(s)"
+                history_message = None
+            elif retry_count:
+                status = f"retry scheduled {retry_count} job(s)"
+                history_message = None
+            else:
+                status = f"done {done_count} job(s)"
+                history_message = None
 
         if self.paused:
             status = "paused"

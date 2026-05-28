@@ -22,6 +22,7 @@ from interview_prep.domain.models import (
     Question,
     QuestionAutoCurationAudit,
     QuestionCompetencyLink,
+    SESSION_STATUS_ABANDONED,
     Session,
     SessionOutcome,
     SystemDesignScenario,
@@ -76,6 +77,66 @@ class CLIFlowTests(unittest.TestCase):
         self.assertIn("Сохраняю ответ...", process.stdout)
         self.assertIn("Ответ сохранен как #1.", process.stdout)
         self.assertNotIn("Генерирую AI feedback", process.stdout)
+
+    def test_session_quit_without_answers_abandons_legacy_cli_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "empty_session.db"
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "session",
+                    "--topic",
+                    "1",
+                    "--no-feedback",
+                    "--db",
+                    str(db_path),
+                ],
+                input="n\n/quit\n",
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertIn("помечена как abandoned", process.stdout)
+
+            connection = connect(db_path)
+            repository = SQLiteRepository(connection)
+            try:
+                session = repository.get_session(1)
+                self.assertIsNotNone(session)
+                assert session is not None
+                self.assertEqual(session.status, SESSION_STATUS_ABANDONED)
+                stats = repository.stats()
+                self.assertEqual(stats["session_count"], 0)
+                self.assertEqual(stats["answered_count"], 0)
+                self.assertEqual(repository.list_completed_practice_sessions(), [])
+            finally:
+                repository.close()
+
+            stats_process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_prep",
+                    "--db",
+                    str(db_path),
+                    "stats",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(stats_process.returncode, 0, stats_process.stderr)
+        self.assertIn("Сессий начато/завершено: 0", stats_process.stdout)
+        self.assertIn("Ответов сохранено: 0", stats_process.stdout)
+        self.assertIn("статус abandoned, ответов 0", stats_process.stdout)
+        self.assertIn("Label: Нужна baseline-практика", stats_process.stdout)
 
     def test_content_generation_commands_are_registered(self) -> None:
         process = subprocess.run(

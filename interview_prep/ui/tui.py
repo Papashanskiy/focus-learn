@@ -142,6 +142,8 @@ Mode = Literal[
     "history",
     "notebook",
     "readiness",
+    "settings",
+    "advanced_menu",
     "session_finished",
     "ended",
 ]
@@ -253,6 +255,12 @@ class InterviewPrepTUI(App[None]):
         padding: 1 2;
     }
 
+    #main_menu {
+        height: 9;
+        margin-bottom: 1;
+        border: solid #2f4052;
+    }
+
     #right_panel {
         width: 30%;
         min-width: 30;
@@ -300,6 +308,7 @@ class InterviewPrepTUI(App[None]):
         self.db_path = db_path
         self.config_path = config_path
         self.services = AppServices(db_path, config_path)
+        self.visual_mode: Literal["minimal", "advanced"] = "minimal"
         self.mode: Mode = "select_topic"
         self.session: Session | None = None
         self.topic: Topic | None = None
@@ -345,6 +354,8 @@ class InterviewPrepTUI(App[None]):
         self.history_return_mode: Mode = "answering"
         self.notebook_return_mode: Mode = "answering"
         self.readiness_return_mode: Mode = "answering"
+        self.settings_return_mode: Mode = "select_topic"
+        self.advanced_menu_return_mode: Mode = "select_topic"
         self.history_browser_view: Literal["practice", "learning", "system_design"] = "practice"
         self.history_selected_session_id: int | None = None
         self.history_selected_learning_topic_id: int | None = None
@@ -424,14 +435,11 @@ class InterviewPrepTUI(App[None]):
             yield Button("Конспект обучения", id="action-notebook", classes="mode_action")
         with Horizontal(id="today_actions"):
             yield Button("Start Drill", id="today-start-drill", classes="today_action")
-            yield Button("Review Weak Answer", id="today-review-weak-answer", classes="today_action")
-            yield Button("Mock Senior Interview", id="today-system-design", classes="today_action")
-            yield Button("Open Readiness", id="today-open-readiness", classes="today_action")
-            yield Button("Notebook", id="today-notebook", classes="today_action")
         with Horizontal(id="workspace"):
             with VerticalScroll(id="left_panel"):
                 yield OptionList(id="topics")
             with VerticalScroll(id="center_panel"):
+                yield OptionList(id="main_menu")
                 yield Static("", id="question")
             with Vertical(id="right_panel"):
                 with VerticalScroll(id="history_scroll"):
@@ -557,6 +565,16 @@ class InterviewPrepTUI(App[None]):
             self.add_history("Readiness dashboard read-only. Используй /mock-interview, /readiness, /practice или /stats.")
             self.render_all()
             return
+        if self.mode == "settings":
+            self.add_history("Settings read-only. Используй /practice, /readiness, /commands или /quit.")
+            self.render_all()
+            return
+        if self.mode == "advanced_menu":
+            self.add_history(
+                "Advanced menu: выбери пункт в меню или используй slash command, например /content или /materials."
+            )
+            self.render_all()
+            return
         if self.mode in {
             "loading_feedback",
             "loading_learning",
@@ -614,6 +632,10 @@ class InterviewPrepTUI(App[None]):
         raise ValueError(f"Unknown practice submit action: {decision.action}")
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "main_menu":
+            self.activate_main_menu_option(event.option.id or "")
+            self.focus_input()
+            return
         if event.option_list.id != "topics":
             return
         option_id = event.option.id or ""
@@ -648,6 +670,53 @@ class InterviewPrepTUI(App[None]):
         elif button_id == "today-notebook":
             self.activate_notebook_action()
         self.focus_input()
+
+    def activate_main_menu_option(self, option_id: str) -> None:
+        if self.mode == "advanced_menu":
+            self.activate_advanced_menu_option(option_id)
+            return
+        if self.mode != "select_topic":
+            self.add_history("Main menu доступно на стартовом экране.")
+            self.render_all()
+            return
+        if option_id == "menu-today":
+            self.activate_today_start_drill_action()
+        elif option_id == "menu-practice":
+            self.activate_practice_action()
+        elif option_id == "menu-learn":
+            self.activate_learning_action()
+        elif option_id == "menu-mock-interview":
+            self.start_mock_senior_interview()
+        elif option_id == "menu-system-design":
+            self.activate_system_design_action()
+        elif option_id == "menu-readiness":
+            self.activate_readiness_action()
+        elif option_id == "menu-advanced":
+            self.enter_advanced_menu()
+        elif option_id == "menu-settings":
+            self.activate_settings_action()
+        else:
+            self.add_history("Неизвестный пункт main menu.")
+            self.render_all()
+
+    def activate_advanced_menu_option(self, option_id: str) -> None:
+        if option_id == "advanced-content":
+            self.enter_content()
+        elif option_id == "advanced-materials":
+            self.enter_artifacts()
+        elif option_id == "advanced-questions-review":
+            self.enter_questions_review()
+        elif option_id == "advanced-curation-audit":
+            self.enter_auto_curation_audit()
+        elif option_id == "advanced-history":
+            self.enter_history()
+        elif option_id == "advanced-commands":
+            self.show_commands()
+        elif option_id == "advanced-back":
+            self.exit_advanced_menu()
+        else:
+            self.add_history("Неизвестный пункт advanced menu.")
+            self.render_all()
 
     def mode_switch_is_waiting_for_ai(self) -> bool:
         return self.mode in {
@@ -696,6 +765,11 @@ class InterviewPrepTUI(App[None]):
             return
         self.enter_readiness()
 
+    def activate_settings_action(self) -> None:
+        if self.block_mode_switch_while_loading():
+            return
+        self.enter_settings()
+
     def activate_practice_action(self) -> None:
         if self.block_mode_switch_while_loading():
             return
@@ -709,6 +783,8 @@ class InterviewPrepTUI(App[None]):
             "history",
             "notebook",
             "readiness",
+            "settings",
+            "advanced_menu",
             "learning",
             "system_design",
         }:
@@ -847,6 +923,10 @@ class InterviewPrepTUI(App[None]):
             self.enter_notebook(command.removeprefix("/notebook").strip())
         elif command == "/readiness":
             self.enter_readiness()
+        elif command == "/settings":
+            self.enter_settings()
+        elif command == "/advanced":
+            self.enter_advanced_menu()
         elif command == "/baseline-repeat":
             self.start_due_baseline_repeat()
         elif command == "/mock-interview":
@@ -1237,6 +1317,24 @@ class InterviewPrepTUI(App[None]):
         self.add_history("Открыт readiness dashboard.")
         self.render_all()
 
+    def enter_settings(self) -> None:
+        if self.mode != "settings":
+            self.settings_return_mode = self.mode
+        self.mode = "settings"
+        self.command_palette_visible = False
+        self.last_feedback = "Settings доступны в read-only режиме."
+        self.add_history("Открыты settings.")
+        self.render_all()
+
+    def enter_advanced_menu(self) -> None:
+        if self.mode != "advanced_menu":
+            self.advanced_menu_return_mode = self.mode
+        self.mode = "advanced_menu"
+        self.command_palette_visible = False
+        self.last_feedback = "Advanced menu открыт."
+        self.add_history("Открыт advanced menu.")
+        self.render_all()
+
     def apply_notebook_selection(self, selection: str) -> None:
         parts = selection.split()
         if parts == ["all"]:
@@ -1312,6 +1410,28 @@ class InterviewPrepTUI(App[None]):
         if self.mode == "select_topic" and self.session is not None:
             self.mode = "answering"
         self.add_history("Возврат из readiness dashboard.")
+        self.render_all()
+
+    def exit_settings(self) -> None:
+        if self.mode != "settings":
+            return
+        self.mode = self.settings_return_mode if self.settings_return_mode != "settings" else "select_topic"
+        if self.mode == "select_topic" and self.session is not None:
+            self.mode = "answering"
+        self.add_history("Возврат из settings.")
+        self.render_all()
+
+    def exit_advanced_menu(self) -> None:
+        if self.mode != "advanced_menu":
+            return
+        self.mode = (
+            self.advanced_menu_return_mode
+            if self.advanced_menu_return_mode != "advanced_menu"
+            else "select_topic"
+        )
+        if self.mode == "select_topic" and self.session is not None:
+            self.mode = "answering"
+        self.add_history("Возврат из advanced menu.")
         self.render_all()
 
     def retry_content_job(self, raw_id: str) -> None:
@@ -2300,9 +2420,17 @@ class InterviewPrepTUI(App[None]):
                 self.add_history(f"Автогенерация использовала fallback: {last_error}")
             self.add_history(f"Автогенерация добавила вопрос #{result.created_question.id}.")
             return
+        if result.job.status == "queued":
+            retry = content_job_retry_text(parse_content_payload(result.job.payload_json))
+            detail = f": {retry}" if retry else ""
+            self.content_status = "retry scheduled"
+            self.add_history(f"Автогенерация контента запланировала retry job #{result.job.id}{detail}.")
+            return
         if result.job.status != "done" or not result.artifact:
+            retry = content_job_retry_text(parse_content_payload(result.job.payload_json))
+            error = result.job.error or retry or "unknown error"
             self.content_status = "failed"
-            self.add_history(f"Автогенерация контента не удалась: {result.job.error}")
+            self.add_history(f"Автогенерация контента не удалась: {error}")
             return
         kind = result.artifact.get("kind")
         if kind == JOB_KIND_LEARNING_MATERIAL:
@@ -2806,6 +2934,12 @@ class InterviewPrepTUI(App[None]):
         if self.mode == "readiness":
             self.exit_readiness()
             return
+        if self.mode == "settings":
+            self.exit_settings()
+            return
+        if self.mode == "advanced_menu":
+            self.exit_advanced_menu()
+            return
         if self.mode in {"learning", "loading_learning"}:
             self.exit_learning()
             return
@@ -2949,7 +3083,7 @@ class InterviewPrepTUI(App[None]):
     def show_commands(self) -> None:
         self.command_palette_visible = True
         self.last_feedback = command_palette_text()
-        self.add_history("Command palette показана в правой панели.")
+        self.add_history("Command palette показана.")
         self.render_all()
 
     def focus_notes(self) -> None:
@@ -3173,11 +3307,20 @@ class InterviewPrepTUI(App[None]):
         self.restore_notes_draft()
         self.apply_layout_mode()
         self.query_one("#topbar", Static).update(self.topbar_text())
+        self.refresh_main_menu()
+        self.refresh_today_action_bar()
         self.refresh_topics()
         self.query_one("#question", Static).update(self.question_text())
         self.query_one("#history", Static).update(self.history_text())
         input_widget = self.query_one("#input_bar", Composer)
         input_widget.placeholder = self.placeholder()
+
+    def refresh_main_menu(self) -> None:
+        menu = self.query_one("#main_menu", OptionList)
+        menu.set_options(self.main_menu_options())
+
+    def refresh_today_action_bar(self) -> None:
+        self.query_one("#today-start-drill", Button).label = self.today_primary_button_label()
 
     def refresh_topics(self) -> None:
         topics = self.query_one("#topics", OptionList)
@@ -3186,13 +3329,17 @@ class InterviewPrepTUI(App[None]):
     def apply_layout_mode(self) -> None:
         focused = self.is_focused_mode()
         today_actions = self.query_one("#today_actions", Horizontal)
+        main_menu = self.query_one("#main_menu", OptionList)
         left_panel = self.query_one("#left_panel", VerticalScroll)
         right_panel = self.query_one("#right_panel", Vertical)
         today_actions.styles.display = "block" if self.mode == "select_topic" else "none"
+        main_menu.styles.display = "block" if self.mode in {"select_topic", "advanced_menu"} else "none"
         left_panel.styles.display = "none" if focused else "block"
         right_panel.styles.display = "block" if self.has_right_panel() else "none"
 
     def has_right_panel(self) -> bool:
+        if self.is_minimal_start_screen():
+            return False
         if self.mode == "content":
             return True
         if self.mode == "questions_review":
@@ -3207,6 +3354,8 @@ class InterviewPrepTUI(App[None]):
             return True
         if self.mode == "readiness":
             return True
+        if self.mode == "settings":
+            return True
         if self.mode in {"learning", "loading_learning"}:
             return True
         if self.mode in {
@@ -3219,6 +3368,9 @@ class InterviewPrepTUI(App[None]):
             return True
         return not self.is_focused_mode()
 
+    def is_minimal_start_screen(self) -> bool:
+        return self.visual_mode == "minimal" and self.mode == "select_topic"
+
     def is_focused_mode(self) -> bool:
         return self.mode in {
             "content",
@@ -3228,6 +3380,8 @@ class InterviewPrepTUI(App[None]):
             "history",
             "notebook",
             "readiness",
+            "settings",
+            "advanced_menu",
             "learning",
             "loading_learning",
             "system_design",
@@ -3260,6 +3414,10 @@ class InterviewPrepTUI(App[None]):
             question = "notebook"
         if self.mode == "readiness":
             question = "readiness"
+        if self.mode == "settings":
+            question = "settings"
+        if self.mode == "advanced_menu":
+            question = "advanced"
         elapsed = self.elapsed()
         target_minutes = self.session.target_minutes if self.session is not None else DEFAULT_SESSION_MINUTES
         remaining = timedelta(minutes=target_minutes) - elapsed
@@ -3315,6 +3473,31 @@ class InterviewPrepTUI(App[None]):
             return f"done #{job_id} {kind}"
         return ""
 
+    def main_menu_options(self) -> list[Option]:
+        if self.mode == "advanced_menu":
+            return self.advanced_menu_options()
+        return [
+            Option("[bold]Today[/bold] - recommended drill", id="menu-today"),
+            Option("[bold]Practice[/bold] - topic questions", id="menu-practice"),
+            Option("[bold]Learn[/bold] - AI explanation dialog", id="menu-learn"),
+            Option("[bold]Mock Interview[/bold] - mixed senior interview", id="menu-mock-interview"),
+            Option("[bold]System Design[/bold] - service design interview", id="menu-system-design"),
+            Option("[bold]Readiness[/bold] - competency dashboard", id="menu-readiness"),
+            Option("[bold]Advanced[/bold] - diagnostics and audit surfaces", id="menu-advanced"),
+            Option("[bold]Settings[/bold] - runtime configuration", id="menu-settings"),
+        ]
+
+    def advanced_menu_options(self) -> list[Option]:
+        return [
+            Option("[bold]Content jobs[/bold] - queue status and worker controls", id="advanced-content"),
+            Option("[bold]Materials[/bold] - generated artifacts and versions", id="advanced-materials"),
+            Option("[bold]Question audit[/bold] - pending generated exceptions", id="advanced-questions-review"),
+            Option("[bold]Curation audit[/bold] - source-backed decisions", id="advanced-curation-audit"),
+            Option("[bold]History[/bold] - raw saved sessions and dialogs", id="advanced-history"),
+            Option("[bold]Command palette[/bold] - all slash commands", id="advanced-commands"),
+            Option("[bold]Back[/bold] - return to previous workflow", id="advanced-back"),
+        ]
+
     def topic_options(self) -> list[Option]:
         stats = self.services.stats.dashboard()
         counts = {item["title"]: item["answers"] for item in stats["topic_dynamics"]}
@@ -3333,11 +3516,21 @@ class InterviewPrepTUI(App[None]):
                 )
             )
         options.append(Option("", disabled=True))
+        if self.is_minimal_start_screen():
+            options.append(
+                Option(
+                    "[dim]Manual: выбери тему кликом или введи topic ID. "
+                    "More modes: /learn /system-design /readiness /notebook /advanced /settings. "
+                    "Advanced: /commands.[/dim]",
+                    disabled=True,
+                )
+            )
+            return options
         options.append(
             Option(
                 "[dim]/accept-topic /commands /content /questions-review /generate-curriculum /history /history learning "
                 "/pause-content /resume-content /materials /notebook(конспект) /readiness /mock-interview /notes /hint "
-                "/answer /feedback /learn /system-design /practice /skip /stats /finish-session /quit[/dim]",
+                "/answer /feedback /learn /system-design /settings /practice /skip /stats /finish-session /quit[/dim]",
                 disabled=True,
             )
         )
@@ -3345,6 +3538,18 @@ class InterviewPrepTUI(App[None]):
 
     def question_text(self) -> str:
         if self.mode == "select_topic":
+            secondary_hint = (
+                "[dim]Manual: выбери тему слева или введи topic ID. "
+                "Mode menu: Today, Practice, Learn, Mock Interview, System Design, Readiness, Advanced, Settings. "
+                "Конспект обучения: /notebook. "
+                "Advanced/debug commands доступны через /commands.[/dim]"
+                if self.is_minimal_start_screen()
+                else (
+                    "[dim]Secondary: выбери тему слева или введи topic ID. "
+                    "Команды: /readiness, /mock-interview, /generate-curriculum, /learn, /system-design, /settings, "
+                    "Конспект обучения: /notebook, /commands, /notes.[/dim]"
+                )
+            )
             lines = [
                 self.today_panel_text(),
                 "",
@@ -3352,11 +3557,7 @@ class InterviewPrepTUI(App[None]):
                 "",
                 self.practice_topic_recommendation_text(),
                 "",
-                (
-                    "[dim]Secondary: выбери тему слева или введи topic ID. "
-                    "Команды: /readiness, /mock-interview, /generate-curriculum, /learn, /system-design, "
-                    "Конспект обучения: /notebook, /commands, /notes.[/dim]"
-                ),
+                secondary_hint,
             ]
             return "\n".join(line for line in lines if line)
         if self.mode == "session_finished":
@@ -3377,6 +3578,10 @@ class InterviewPrepTUI(App[None]):
             return self.notebook_text()
         if self.mode == "readiness":
             return self.readiness_text()
+        if self.mode == "settings":
+            return self.settings_text()
+        if self.mode == "advanced_menu":
+            return self.advanced_menu_text()
         if self.mode in {"learning", "loading_learning"}:
             return self.learning_text()
         if self.mode in {
@@ -3635,6 +3840,23 @@ class InterviewPrepTUI(App[None]):
         if "нет rubric оценки" in reasons:
             return "Enter - ответить в TUI и сохранить rubric evaluation; ID темы слева - ручной выбор."
         return "Enter - начать рекомендованный practice drill; ID темы слева - ручной выбор."
+
+    def today_primary_button_label(self) -> str:
+        empty_state_action = self.today_empty_state_action()
+        if empty_state_action == "generate_curriculum":
+            return "Generate Curriculum"
+        if empty_state_action == "baseline_session":
+            return "Start Baseline"
+        if self.baseline_repeat_due_status() is not None:
+            return "Repeat Baseline"
+        drill = self.today_recommended_drill()
+        if drill is None:
+            return "Start Drill"
+        if "нет system design практики" in drill.reasons:
+            return "Start Mock Interview"
+        if "нет связанных вопросов" in drill.reasons:
+            return "Generate Curriculum"
+        return "Start Drill"
 
     def current_question_tags_text(self) -> str:
         if self.question is None or self.question.id is None:
@@ -4138,6 +4360,45 @@ class InterviewPrepTUI(App[None]):
         lines.extend(["", "/practice - вернуться назад. /stats - краткая CLI-style статистика."])
         return "\n".join(lines)
 
+    def settings_text(self) -> str:
+        config = self.services.config.ollama
+        return "\n".join(
+            [
+                "[bold cyan]Settings[/bold cyan]",
+                "",
+                "[bold]Runtime[/bold]",
+                f"Config path: {escape(str(self.config_path))}",
+                f"Database: {escape(str(self.db_path))}",
+                f"Ollama model: {escape(config.model)}",
+                f"Ollama base URL: {escape(config.base_url)}",
+                f"Ollama timeout: {config.timeout_seconds:g}s",
+                "",
+                "[bold]Content worker[/bold]",
+                f"State: {escape(self.content_status_text())}",
+                f"Paused: {'yes' if self.content_worker_paused else 'no'}",
+                "",
+                "[bold]Navigation[/bold]",
+                "/practice - вернуться назад. /readiness - открыть dashboard. /commands - command palette.",
+            ]
+        )
+
+    def advanced_menu_text(self) -> str:
+        lines = [
+            "[bold cyan]Advanced menu[/bold cyan]",
+            "",
+            "Диагностика, audit surfaces, saved artifacts и raw history вынесены сюда, чтобы стартовый экран оставался focused.",
+            "Выбери пункт в меню выше или используй slash command напрямую.",
+            "",
+            "[bold]Power-user slash fallbacks[/bold]",
+            "/content, /materials, /questions-review, /curation-audit, /history, /commands.",
+            "Queue controls остаются внутри Content jobs: /pause-content, /resume-content, /retry-job <id>.",
+            "",
+            "/practice - назад к предыдущему workflow.",
+        ]
+        if self.command_palette_visible and self.last_feedback:
+            lines.extend(["", "[bold]Command palette[/bold]", self.last_feedback])
+        return "\n".join(lines)
+
     def readiness_competency_text(self, aggregate, gap_actions: dict[str, str]) -> str:
         competency = aggregate.competency
         slug = competency.slug
@@ -4313,6 +4574,8 @@ class InterviewPrepTUI(App[None]):
             return self.notebook_side_panel_text()
         if self.mode == "readiness":
             return self.readiness_side_panel_text()
+        if self.mode == "settings":
+            return self.settings_side_panel_text()
         if self.mode in {"learning", "loading_learning"}:
             return self.learning_side_panel_text()
         if self.mode in {
@@ -5271,6 +5534,26 @@ class InterviewPrepTUI(App[None]):
             lines.extend(["", "[bold]Панель[/bold]", self.last_feedback])
         return "\n".join(lines)
 
+    def settings_side_panel_text(self) -> str:
+        lines = [
+            "[bold]Settings[/bold]",
+            "",
+            "[bold]Следующее действие[/bold]",
+            "Проверь runtime config или вернись к текущему workflow.",
+            "",
+            "[bold]Команды[/bold]",
+            "/practice",
+            "/readiness",
+            "/commands",
+            "/quit",
+            "",
+            "[bold]Последние события[/bold]",
+        ]
+        lines.extend(self.history[-8:] or ["Пока нет событий."])
+        if self.command_palette_visible or self.last_feedback.startswith("Статистика:"):
+            lines.extend(["", "[bold]Панель[/bold]", self.last_feedback])
+        return "\n".join(lines)
+
     def learning_side_panel_text(self) -> str:
         topic = self.learning_topic_title()
         material_status = "готов" if self.generated_learning_material else "генерируется" if self.content_worker_running else "нет"
@@ -5392,6 +5675,10 @@ class InterviewPrepTUI(App[None]):
             return "/notebook topic <id>, /notebook subtopic <id>, /notebook competency <slug>, /notebook entry <id>, /practice"
         if self.mode == "readiness":
             return "/mock-interview, /readiness, /stats или /practice назад"
+        if self.mode == "settings":
+            return "/practice назад, /readiness, /commands или /quit"
+        if self.mode == "advanced_menu":
+            return "Выбери advanced menu item или /practice назад"
         if self.mode == "session_finished":
             return "/practice новая сессия, /history, /notebook, /quit"
         if self.mode == "learning":

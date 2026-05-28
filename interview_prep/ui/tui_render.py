@@ -609,6 +609,8 @@ def command_palette_text() -> str:
         (
             "Utility",
             [
+                "/advanced  advanced diagnostics/audit menu",
+                "/settings  read-only runtime configuration",
                 "/stats     показать статистику",
                 "/quit      завершить сессию",
             ],

@@ -194,12 +194,14 @@ python -m interview_prep content-retry 1
 - `system-design-scenario` — генерирует scenario для mock interview и сохраняет его в `system_design_scenarios`;
 - `reference-answer` — регенерирует эталонные ответы существующих вопросов выбранной темы, не меняя сами вопросы и подсказки.
 
-`content-worker` можно запускать отдельным терминальным процессом; он берет queued jobs, вызывает Ollama/fallback и сохраняет результат. Для постоянной фоновой обработки запусти `content-worker` без `--once`.
+`content-worker` можно запускать отдельным терминальным процессом; он берет queued jobs, вызывает Ollama/fallback и сохраняет результат. Transient failures автоматически возвращаются в `queued` с `retry.attempt`, `next_attempt_at` и exponential backoff до `max_attempts` (по умолчанию 3); non-retryable или исчерпанные failures остаются `failed` для ручного `content-retry`/`/retry-job`.
+Если job находится в backoff, worker пропускает ее до `next_attempt_at` и берет следующую готовую queued job.
+Для постоянной фоновой обработки запусти `content-worker` без `--once`.
 Сервис генерации держит лимит активных задач: для одной пары topic/kind одновременно допускается не больше одной `queued` или `running` job.
 
 В обычном TUI-flow ручной запуск этих команд не обязателен: при выборе темы приложение само проверяет, хватает ли вопросов, ставит `question` job и запускает background worker. При входе в `/learn` TUI сначала загружает последний сохраненный `learning_materials` для темы, а если его нет — ставит `learning-material` job. При входе в `/system-design` TUI сначала загружает последний сохраненный `system_design_scenarios`, а если его нет — ставит `system-design-scenario` job. Статус виден в верхней строке как `Content: ...`: TUI показывает состояние worker, компактные счетчики queued/running/failed и последний done/failed generation result. CLI-команды остаются для диагностики и ручного управления очередью.
 
-В TUI также есть служебный экран `/content`: он показывает списки `queued`, `running` и `failed` background jobs с id, типом, темой, заметкой, retry/backoff metadata и ошибкой. Команда `/generate-curriculum` ставит безопасную фоновую `curriculum` job для starter pack и запускает TUI worker. TUI worker можно поставить на паузу через `/pause-content`, чтобы queued jobs остались в SQLite без обработки, и возобновить через `/resume-content`. Failed job можно вернуть в очередь прямо из TUI командой `/retry-job <id>`; команда использует тот же service-level retry flow, очищает stale backoff и запускает background worker, если worker не на паузе.
+В TUI также есть служебный экран `/content`: он показывает списки `queued`, `running` и `failed` background jobs с id, типом, темой, заметкой, retry/backoff metadata и ошибкой. Команда `/generate-curriculum` ставит безопасную фоновую `curriculum` job для starter pack и запускает TUI worker. TUI worker можно поставить на паузу через `/pause-content`, чтобы queued jobs остались в SQLite без обработки, и возобновить через `/resume-content`. Retryable failure отображается как scheduled retry, а не как hard failure. Failed job после исчерпания попыток можно вернуть в очередь прямо из TUI командой `/retry-job <id>`; команда использует тот же service-level retry flow, очищает stale backoff и запускает background worker, если worker не на паузе.
 
 Статистика:
 
@@ -375,7 +377,7 @@ AI feedback в приложении — это учебная подсказка
 
 Правая панель включает отдельный notes editor. Используй `/notes` или `Ctrl+N`, чтобы перейти к заметкам; `Esc` возвращает фокус в composer. Draft заметок сохраняется и восстанавливается для текущего session/topic/global context. Команда `/save-note <title>` сохраняет текст из multiline composer как named manual note: первая строка — команда с title, затем `Shift+Enter` и тело заметки; `/note-from-answer` сохраняет gap из последнего AI feedback как notebook entry текущей темы. Saved notes и feedback gaps видны в `/notebook` рядом с AI explanations. `Ctrl+P` или `/commands` показывает command palette со списком команд.
 
-Старый CLI `session` оставлен для быстрых терминальных сценариев. В нем обычный ответ вводится одной строкой и завершается Enter. Для многострочного ответа сначала введи `/multi`, затем заверши ввод пустой строкой или строкой с одной точкой:
+Старый CLI `session` оставлен для быстрых терминальных сценариев. В нем обычный ответ вводится одной строкой и завершается Enter. Если выйти через `/quit` до сохранения первого ответа, session помечается как `abandoned` и не попадает в completed stats/readiness counters. Для многострочного ответа сначала введи `/multi`, затем заверши ввод пустой строкой или строкой с одной точкой:
 
 ```text
 My answer line 1

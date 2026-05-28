@@ -2,6 +2,66 @@
 
 ## 2026-05-28
 
+### TUI progressive disclosure advanced menu
+
+- Первый open roadmap item `Progressive disclosure` был слишком крупным для одной итерации, поэтому он разбит в `## Next` на advanced menu foundation, start-screen cleanup и queue controls grouping.
+- Закрыт первый safe leaf: стартовое mode menu получило пункт `Advanced`, который открывает focused advanced screen с пунктами Content jobs, Materials, Question audit, Curation audit, History и Command palette.
+- Slash-command fallbacks сохранены: `/content`, `/materials`, `/questions-review`, `/curation-audit`, `/history` и `/commands` продолжают открывать прежние экраны напрямую.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_main_menu_supports_keyboard_and_mouse_selection tests.test_tui.TUITests.test_tui_advanced_menu_exposes_diagnostics_without_breaking_slash_fallbacks tests.test_tui.TUIHelperTests.test_command_palette_text_lists_core_commands -v`, `python -m unittest tests.test_tui.TUITests.test_tui_minimal_start_screen_hides_debug_panes_and_hints tests.test_tui.TUITests.test_tui_today_action_bar_shows_only_primary_action -v`, `python -m compileall interview_prep`.
+
+### TUI minimal mode layout
+
+- Закрыт parent roadmap leaf `Minimal mode layout`: проверенный default minimal start screen уже показывает Today task, один primary action, compact readiness/progress context и mode menu, а service/debug panes скрыты с первого экрана.
+- Поведенческих изменений не понадобилось: parent закрыт после ранее выполненных start-screen shell и start action simplification leaves.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_minimal_start_screen_hides_debug_panes_and_hints tests.test_tui.TUITests.test_tui_today_action_bar_shows_only_primary_action tests.test_tui.TUITests.test_tui_primary_action_starts_low_rubric_practice tests.test_tui.TUITests.test_tui_main_menu_supports_keyboard_and_mouse_selection tests.test_tui.TUITests.test_tui_today_enter_starts_recommended_drill -v`.
+
+### TUI start action simplification
+
+- Закрыт roadmap leaf `Start action simplification`: в minimal start screen Today action bar теперь показывает только один primary action button, а secondary переходы остаются в mode menu и slash-command fallback.
+- Primary button получает context-aware label для mock interview, baseline, repeat baseline и curriculum setup, но использует прежний `activate_today_start_drill_action()` flow.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_today_action_bar_shows_only_primary_action tests.test_tui.TUITests.test_tui_primary_action_starts_low_rubric_practice tests.test_tui.TUITests.test_tui_main_menu_supports_keyboard_and_mouse_selection tests.test_tui.TUITests.test_tui_today_enter_starts_recommended_drill -v`, `python -m unittest tests.test_tui.TUITests.test_tui_clicking_mode_actions_switches_main_workflows tests.test_tui.TUITests.test_tui_smoke_switches_today_practice_learn_system_design_readiness_practice tests.test_tui.TUITests.test_tui_notebook_action_opens_current_topic_entries -v`, `python -m compileall interview_prep`.
+
+### TUI minimal start shell
+
+- Первый open leaf `Minimal mode layout` был слишком крупным для одной итерации, поэтому он разбит в `## Next` на start-screen shell и start action simplification.
+- Закрыт первый safe leaf: TUI получил default `minimal` visual mode; стартовый экран скрывает generic right/debug pane с notes/history и больше не рекламирует `/content`, `/materials`, `/questions-review` в first-screen hints.
+- Ручной выбор topic и Today primary action сохранены: левая колонка с темами остается доступной, а advanced/debug commands остаются через `/commands`.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_minimal_start_screen_hides_debug_panes_and_hints tests.test_tui.TUITests.test_tui_main_menu_supports_keyboard_and_mouse_selection tests.test_tui.TUITests.test_tui_clicking_practice_topic_starts_topic_session tests.test_tui.TUITests.test_tui_today_enter_starts_recommended_drill -v`.
+
+### TUI main menu foundation
+
+- Закрыт roadmap leaf из 0C: стартовый экран TUI получил selectable main menu с режимами Today, Practice, Learn, Mock Interview, System Design, Readiness и Settings.
+- Menu построено на `OptionList`, поэтому поддерживает keyboard selection через arrows/Enter при фокусе и mouse selection; пункты переиспользуют существующие action handlers, а Settings открыт как read-only runtime/config screen без изменения storage.
+- Добавлен `/settings` как power-user fallback и пункт command palette.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_main_menu_supports_keyboard_and_mouse_selection tests.test_tui.TUITests.test_tui_today_enter_starts_recommended_drill tests.test_tui.TUITests.test_tui_clicking_mode_actions_switches_main_workflows tests.test_tui.TUIHelperTests.test_command_palette_text_lists_core_commands -v`, `python -m compileall interview_prep`. Дополнительно запускался `python -m unittest tests.test_tui -v`: текущий полный TUI suite по-прежнему падает только в двух ранее известных regression-тестах `test_tui_practice_question_shows_linked_tags`/`test_tui_practice_question_shows_linked_competencies`, где canonical-priority selection выбирает canonical question вместо manually tagged fixture question.
+
+### TUI UX inventory
+
+- Закрыт первый leaf из 0C: добавлен `TUI_UX_INVENTORY.md` с перечислением текущих first-screen actions, panes, slash-command groups и secondary surfaces.
+- Зафиксирован минимальный split для следующих UX-шагов: default flow должен оставить Today recommendation, primary action, mode choice и компактный progress/readiness signal, а queue/materials/review/audit/raw history controls уйти в advanced/debug.
+- Runtime behavior не менялся.
+- Проверки: `python -m compileall interview_prep`, `rg -n "TUI UX inventory|TUI_UX_INVENTORY|advanced/debug|Minimal Flow" TUI_UX_INVENTORY.md DEVELOPMENT_LOG.md ROADMAP.md`.
+
+### 0B docs sync
+
+- Закрыт roadmap docs leaf после reliability/migration follow-ups: README описывает automatic retry/backoff и empty legacy CLI session outcome, CLAUDE фиксирует TUI/content-worker contract, а ROADMAP отражает закрытый 0B queue.
+- Схема зафиксирована отдельным migration guard entry: `CURRENT_SCHEMA_VERSION` должен совпадать с последним explicit migration step.
+- Проверки: `python -m compileall interview_prep`, `rg -n "automatic retry|scheduled retry|abandoned|CURRENT_SCHEMA_VERSION|0B docs sync" README.md CLAUDE.md DEVELOPMENT_LOG.md ROADMAP.md`.
+
+### CLI empty session status
+
+- Закрыт roadmap leaf про legacy CLI `session`: выход через `/quit` до первого сохраненного ответа теперь вызывает `finish_session(..., abandon_if_empty=True)` и помечает session как `abandoned`, а не `completed`.
+- Добавлен regression-тест через реальный CLI-процесс: пустая session не попадает в `session_count`, `answered_count`, completed history и сохраняется в stats recent history как `abandoned`; readiness остается в baseline empty-state.
+- README синхронизирован с новым CLI session outcome behavior.
+- Проверки: `python -m unittest tests.test_cli_flow.CLIFlowTests.test_session_quit_without_answers_abandons_legacy_cli_session tests.test_cli_flow.CLIFlowTests.test_session_no_feedback_saves_answer_after_single_line_input -v`, `python -m compileall interview_prep`.
+
+### Content generation automatic retry contract
+
+- Закрыт roadmap leaf про content generation retry: transient worker failures теперь остаются в automatic retry flow — job возвращается в `queued`, получает `retry.attempt`, `next_attempt_at`, exponential backoff и повторяется до `max_attempts`.
+- Non-retryable/final failures остаются `failed` для ручного `content-retry` или TUI `/retry-job`; CLI/TUI worker теперь явно показывают scheduled retry и больше не подписывают requeued transient failure как hard failure.
+- Документация синхронизирована в `README.md`, `CLAUDE.md` и `ROADMAP.md`.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_content_generation_transient_failure_requeues_with_retry_backoff_metadata tests.test_services.ServiceTests.test_content_generation_transient_failure_fails_after_max_attempts tests.test_services.ServiceTests.test_content_generation_worker_skips_jobs_until_backoff_expires tests.test_services.ServiceTests.test_content_generation_retry_moves_failed_job_to_queue tests.test_services.ServiceTests.test_content_generation_retry_respects_active_job_limit -v`, `python -m unittest tests.test_tui.ContentWorkerControllerTests.test_finish_run_normalizes_results_and_updates_status tests.test_tui.TUIHelperTests.test_tui_records_retry_scheduled_content_result_without_failed_status tests.test_tui.TUITests.test_tui_content_screen_retries_failed_job tests.test_tui.TUITests.test_tui_content_screen_lists_service_jobs -v`, `python -m compileall interview_prep`.
+
 ### Migration schema-version guard
 
 - Закрыт roadmap leaf про migration hygiene: `CURRENT_SCHEMA_VERSION` проверен против последнего explicit migration step (`020_question_auto_curation_audit_tables`) и уже равен `20`.

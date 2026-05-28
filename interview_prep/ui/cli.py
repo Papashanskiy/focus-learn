@@ -11,6 +11,7 @@ from interview_prep.domain.models import (
     Question,
     QuestionAutoCurationAudit,
     QuestionCompetencyLink,
+    SESSION_STATUS_ABANDONED,
     QuestionSourceSnapshot,
     SESSION_STATUS_COMPLETED,
     SessionOutcome,
@@ -28,6 +29,7 @@ from interview_prep.services.content_generation_service import (
     JOB_KIND_QUESTION,
     JOB_KIND_REFERENCE_ANSWER,
     JOB_KIND_SYSTEM_DESIGN_SCENARIO,
+    parse_payload,
 )
 from interview_prep.services.app_factory import AppServices
 from interview_prep.services.curriculum_service import CurriculumStatus
@@ -931,6 +933,23 @@ def cmd_content_worker(args: argparse.Namespace, services: AppServices) -> int:
             if result.created_question is None:
                 if job.status == "done" and result.artifact:
                     print(f"#{job.id} done: {job.kind}")
+                elif job.status == "queued":
+                    retry = parse_payload(job.payload_json).get("retry")
+                    retry_text = ""
+                    if isinstance(retry, dict):
+                        attempt = retry.get("attempt")
+                        max_attempts = retry.get("max_attempts")
+                        next_attempt_at = retry.get("next_attempt_at")
+                        last_error = retry.get("last_error")
+                        retry_parts = []
+                        if attempt is not None and max_attempts is not None:
+                            retry_parts.append(f"{attempt}/{max_attempts}")
+                        if next_attempt_at:
+                            retry_parts.append(f"next {next_attempt_at}")
+                        if last_error:
+                            retry_parts.append(str(last_error))
+                        retry_text = f": {'; '.join(retry_parts)}" if retry_parts else ""
+                    print(f"#{job.id} retry scheduled{retry_text}")
                 else:
                     print(f"#{job.id} failed: {job.error}")
             else:
@@ -1464,8 +1483,11 @@ def cmd_session(args: argparse.Namespace, services: AppServices) -> int:
             if not ask_yes_no("Следующий вопрос?", default=True):
                 break
     finally:
-        services.sessions.finish_session(session.id or 0)
-        print(f"Сессия #{session.id} завершена.")
+        finished = services.sessions.finish_session(session.id or 0, abandon_if_empty=True)
+        if finished.status == SESSION_STATUS_ABANDONED:
+            print(f"Сессия #{session.id} завершена без ответов и помечена как abandoned.")
+        else:
+            print(f"Сессия #{session.id} завершена.")
     return 0
 
 

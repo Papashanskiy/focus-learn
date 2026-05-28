@@ -330,6 +330,7 @@ class ContentWorkerControllerTests(unittest.TestCase):
         worker = ContentWorkerOrchestrator()
         worker.running = True
         done_result = SimpleNamespace(job=SimpleNamespace(status="done"))
+        retry_result = SimpleNamespace(job=SimpleNamespace(status="queued"))
         failed_result = SimpleNamespace(job=SimpleNamespace(status="failed"))
 
         empty = worker.finish_run(None)
@@ -342,6 +343,13 @@ class ContentWorkerControllerTests(unittest.TestCase):
         self.assertEqual(done.results, (done_result,))
         self.assertEqual(done.status, "done 1 job(s)")
         self.assertEqual(worker.status, "done 1 job(s)")
+
+        retry = worker.finish_run([retry_result])
+        self.assertEqual(retry.results, (retry_result,))
+        self.assertEqual(retry.status, "retry scheduled 1 job(s)")
+
+        done_with_retry = worker.finish_run([done_result, retry_result])
+        self.assertEqual(done_with_retry.status, "done 1 job(s), retry scheduled 1 job(s)")
 
         failed = worker.finish_run((done_result, failed_result))
         self.assertEqual(failed.status, "failed")
@@ -925,6 +933,28 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
             finally:
                 app.services.close()
 
+    async def test_tui_minimal_start_screen_hides_debug_panes_and_hints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_minimal_start_screen.db"))
+            try:
+                async with app.run_test(size=(120, 36)):
+                    center = app.question_text()
+                    topic_hints = "\n".join(
+                        str(option.prompt) for option in app.query_one("#topics", OptionList).options
+                    )
+
+                    self.assertEqual(app.visual_mode, "minimal")
+                    self.assertEqual(app.mode, "select_topic")
+                    self.assertEqual(app.query_one("#left_panel").styles.display, "block")
+                    self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+                    self.assertIn("Advanced/debug commands доступны через /commands.", center)
+                    self.assertIn("Advanced: /commands.", topic_hints)
+                    for debug_command in ("/content", "/materials", "/questions-review"):
+                        self.assertNotIn(debug_command, center)
+                        self.assertNotIn(debug_command, topic_hints)
+            finally:
+                app.services.close()
+
     async def test_tui_start_screen_shows_today_empty_state_without_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app = InterviewPrepTUI(str(Path(tmp) / "tui_today_empty_state.db"))
@@ -969,6 +999,109 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                         "Primary action: Enter - начать первую baseline practice session",
                         center,
                     )
+            finally:
+                app.services.close()
+
+    async def test_tui_main_menu_supports_keyboard_and_mouse_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_main_menu_keyboard.db"))
+            try:
+                async with app.run_test(size=(140, 36)) as pilot:
+                    menu = app.query_one("#main_menu", OptionList)
+                    self.assertEqual(
+                        [option.id for option in menu.options],
+                        [
+                            "menu-today",
+                            "menu-practice",
+                            "menu-learn",
+                            "menu-mock-interview",
+                            "menu-system-design",
+                            "menu-readiness",
+                            "menu-advanced",
+                            "menu-settings",
+                        ],
+                    )
+
+                    menu.focus()
+                    menu.highlighted = 6
+                    await pilot.press("down", "enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "settings")
+                    self.assertIn("[bold cyan]Settings[/bold cyan]", app.question_text())
+                    self.assertIn("Ollama model:", app.question_text())
+            finally:
+                app.services.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_main_menu_mouse.db"))
+            self.seed_one_practice_answer(app)
+            app.services.content_generation = self.QuietContentGeneration()
+            try:
+                async with app.run_test(size=(140, 36)) as pilot:
+                    clicked = await pilot.click("#main_menu", offset=(4, 2))
+                    await pilot.pause()
+
+                    self.assertTrue(clicked)
+                    self.assertEqual(app.mode, "answering")
+                    self.assertIsNotNone(app.session)
+                    self.assertIsNotNone(app.question)
+            finally:
+                app.services.close()
+
+    async def test_tui_advanced_menu_exposes_diagnostics_without_breaking_slash_fallbacks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_advanced_menu.db"))
+            try:
+                async with app.run_test(size=(140, 36)) as pilot:
+                    menu = app.query_one("#main_menu", OptionList)
+                    self.assertIn("menu-advanced", [option.id for option in menu.options])
+
+                    menu.focus()
+                    menu.highlighted = 6
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "advanced_menu")
+                    self.assertTrue(app.is_focused_mode())
+                    self.assertEqual(app.query_one("#left_panel").styles.display, "none")
+                    self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+                    self.assertIn("[bold cyan]Advanced menu[/bold cyan]", app.question_text())
+                    advanced_options = [option.id for option in app.query_one("#main_menu", OptionList).options]
+                    self.assertEqual(
+                        advanced_options,
+                        [
+                            "advanced-content",
+                            "advanced-materials",
+                            "advanced-questions-review",
+                            "advanced-curation-audit",
+                            "advanced-history",
+                            "advanced-commands",
+                            "advanced-back",
+                        ],
+                    )
+
+                    menu = app.query_one("#main_menu", OptionList)
+                    menu.focus()
+                    menu.highlighted = 0
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "content")
+                    self.assertIn("[bold cyan]Content jobs[/bold cyan]", app.question_text())
+
+                    input_bar = app.query_one("#input_bar", TextArea)
+                    input_bar.value = "/practice"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "select_topic")
+                    input_bar.value = "/materials"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "artifacts")
+                    self.assertIn("[bold cyan]Materials[/bold cyan]", app.question_text())
             finally:
                 app.services.close()
 
@@ -1181,22 +1314,19 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
             finally:
                 app.services.close()
 
-    async def test_tui_today_action_buttons_are_visible_and_start_primary_drill(self) -> None:
+    async def test_tui_today_action_bar_shows_only_primary_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app = InterviewPrepTUI(str(Path(tmp) / "tui_today_actions.db"))
             self.seed_one_practice_answer(app)
             app.services.content_generation = self.QuietContentGeneration()
             try:
                 async with app.run_test(size=(140, 36)) as pilot:
-                    expected_labels = {
-                        "today-start-drill": "Start Drill",
-                        "today-review-weak-answer": "Review Weak Answer",
-                        "today-system-design": "Mock Senior Interview",
-                        "today-open-readiness": "Open Readiness",
-                        "today-notebook": "Notebook",
-                    }
-                    for button_id, label in expected_labels.items():
-                        self.assertEqual(str(app.query_one(f"#{button_id}", Button).label), label)
+                    today_buttons = list(app.query_one("#today_actions").query(Button))
+                    self.assertEqual([button.id for button in today_buttons], ["today-start-drill"])
+                    self.assertEqual(str(app.query_one("#today-start-drill", Button).label), "Start Mock Interview")
+                    menu = app.query_one("#main_menu", OptionList)
+                    self.assertIn("menu-readiness", [option.id for option in menu.options])
+                    self.assertIn("menu-mock-interview", [option.id for option in menu.options])
 
                     clicked = await pilot.click("#today-start-drill")
                     await pilot.pause()
@@ -1211,7 +1341,7 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
             finally:
                 app.services.close()
 
-    async def test_tui_today_review_weak_answer_click_starts_low_rubric_practice(self) -> None:
+    async def test_tui_primary_action_starts_low_rubric_practice(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app = InterviewPrepTUI(str(Path(tmp) / "tui_today_review_weak_answer.db"))
             self.seed_low_rubric_answer(app)
@@ -1227,7 +1357,8 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     expected_topic_id = app.today_topic_id_for_competency(drill.competency.slug)
                     self.assertIsNotNone(expected_topic_id)
 
-                    clicked = await pilot.click("#today-review-weak-answer")
+                    self.assertEqual(str(app.query_one("#today-start-drill", Button).label), "Start Drill")
+                    clicked = await pilot.click("#today-start-drill")
                     await pilot.pause()
 
                     self.assertTrue(clicked)
@@ -4899,6 +5030,34 @@ class TUIHelperTests(unittest.TestCase):
         self.assertEqual(one_line_preview("one\n two"), "one two")
         self.assertTrue(one_line_preview("x" * 200).endswith("..."))
 
+    def test_tui_records_retry_scheduled_content_result_without_failed_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_retry_result.db"))
+            try:
+                result = SimpleNamespace(
+                    created_question=None,
+                    artifact=None,
+                    job=SimpleNamespace(
+                        id=7,
+                        status="queued",
+                        error=None,
+                        payload_json=(
+                            '{"retry": {"attempt": 1, "max_attempts": 3, '
+                            '"next_attempt_at": "2026-05-28T10:00:00", "last_error": "timeout"}}'
+                        ),
+                    ),
+                )
+
+                app.apply_background_content_result(result, None)
+
+                history = "\n".join(app.history)
+                self.assertEqual(app.content_status, "retry scheduled")
+                self.assertIn("Автогенерация контента запланировала retry job #7", history)
+                self.assertIn("1/3; next 2026-05-28T10:00:00; timeout", history)
+                self.assertNotIn("не удалась", history)
+            finally:
+                app.services.close()
+
     def test_render_chat_message_escapes_user_rich_markup(self) -> None:
         rendered = render_chat_message("Ты", "[bold]не markup[/bold]\n```python\nprint(1)\n```")
 
@@ -5116,6 +5275,8 @@ class TUIHelperTests(unittest.TestCase):
         self.assertIn("/finish-session", palette)
         self.assertIn("/req", palette)
         self.assertIn("/decision", palette)
+        self.assertIn("/advanced", palette)
+        self.assertIn("/settings", palette)
 
     def test_content_artifact_label_formats_curriculum_jobs(self) -> None:
         label = content_artifact_id_label(

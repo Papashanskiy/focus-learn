@@ -4968,7 +4968,7 @@ class ServiceTests(unittest.TestCase):
             },
         )
 
-    def test_content_generation_failure_records_retry_backoff_metadata(self) -> None:
+    def test_content_generation_transient_failure_requeues_with_retry_backoff_metadata(self) -> None:
         repository = make_repository()
         service = ContentGenerationService(repository, BrokenLLM())
         topic_id = repository.find_topic_by_slug("async-backend").id
@@ -4979,8 +4979,10 @@ class ServiceTests(unittest.TestCase):
         failed = repository.get_content_generation_job(job.id or 0)
 
         self.assertIsNotNone(result)
-        self.assertEqual(result.job.status, "failed")
+        self.assertEqual(result.job.status, "queued")
         self.assertIsNotNone(failed)
+        self.assertEqual(failed.status, "queued")
+        self.assertIsNone(failed.error)
         payload = json.loads(failed.payload_json)
         retry = payload["retry"]
         self.assertEqual(retry["attempt"], 1)
@@ -4989,6 +4991,34 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(retry["last_error"], "test generation failed")
         self.assertGreaterEqual(datetime.fromisoformat(retry["next_attempt_at"]), before + timedelta(seconds=55))
         self.assertLessEqual(datetime.fromisoformat(retry["next_attempt_at"]), datetime.now() + timedelta(seconds=65))
+
+    def test_content_generation_transient_failure_fails_after_max_attempts(self) -> None:
+        repository = make_repository()
+        service = ContentGenerationService(repository, BrokenLLM())
+        topic_id = repository.find_topic_by_slug("async-backend").id
+        job = service.enqueue_question(topic_id, "will fail")
+        payload = json.loads(job.payload_json)
+        payload["retry"]["attempt"] = 2
+        payload["retry"]["max_attempts"] = 3
+        repository.update_content_generation_job_payload(
+            job.id or 0,
+            json.dumps(payload, ensure_ascii=False),
+        )
+
+        result = service.process_next_job()
+        failed = repository.get_content_generation_job(job.id or 0)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.job.status, "failed")
+        self.assertIsNotNone(failed)
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.error, "test generation failed")
+        retry = json.loads(failed.payload_json)["retry"]
+        self.assertEqual(retry["attempt"], 3)
+        self.assertEqual(retry["max_attempts"], 3)
+        self.assertEqual(retry["backoff_seconds"], 240)
+        self.assertIsNone(retry["next_attempt_at"])
+        self.assertEqual(retry["last_error"], "test generation failed")
 
     def test_content_generation_worker_skips_jobs_until_backoff_expires(self) -> None:
         repository = make_repository()
