@@ -947,11 +947,118 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.mode, "select_topic")
                     self.assertEqual(app.query_one("#left_panel").styles.display, "block")
                     self.assertEqual(app.query_one("#right_panel").styles.display, "none")
-                    self.assertIn("Advanced/debug commands доступны через /commands.", center)
-                    self.assertIn("Advanced: /commands.", topic_hints)
-                    for debug_command in ("/content", "/materials", "/questions-review"):
+                    self.assertIn("Advanced tools доступны через menu Advanced, /advanced или /commands.", center)
+                    self.assertIn("Advanced tools: menu Advanced, /advanced или /commands.", topic_hints)
+                    self.assertNotIn("debug", center.lower())
+                    self.assertNotIn("debug", topic_hints.lower())
+                    for debug_command in (
+                        "/content",
+                        "/materials",
+                        "/questions-review",
+                        "/curation-audit",
+                        "/history",
+                        "/pause-content",
+                        "/resume-content",
+                        "/retry-job",
+                    ):
                         self.assertNotIn(debug_command, center)
                         self.assertNotIn(debug_command, topic_hints)
+            finally:
+                app.services.close()
+
+    async def test_tui_minimal_practice_screen_hides_side_panels_and_keeps_next_action_inline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_minimal_practice_focus.db"))
+            try:
+                async with app.run_test(size=(120, 36)) as pilot:
+                    input_bar = app.query_one("#input_bar", TextArea)
+                    topic = app.services.questions.list_topics()[0]
+
+                    input_bar.value = str(topic.id)
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "answering")
+                    self.assertEqual(app.query_one("#left_panel").styles.display, "none")
+                    self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+                    answering_text = app.question_text()
+                    self.assertIn("[bold]Вопрос #", answering_text)
+                    self.assertIn("[bold]Следующее действие[/bold]", answering_text)
+                    self.assertIn("Напиши ответ обычным текстом", answering_text)
+
+                    input_bar.value = "Дескрипторы помогают управлять доступом к атрибутам."
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "scoring")
+                    self.assertEqual(app.query_one("#left_panel").styles.display, "none")
+                    self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+                    scoring_text = app.question_text()
+                    self.assertIn("Твой ответ", scoring_text)
+                    self.assertIn("Самооценка", scoring_text)
+                    self.assertIn("Эталонный ответ", scoring_text)
+                    self.assertIn("[bold]Следующее действие[/bold]", scoring_text)
+                    self.assertIn("Введи самооценку 1-5", scoring_text)
+
+                    input_bar.value = "4"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "answered")
+                    self.assertEqual(app.query_one("#left_panel").styles.display, "none")
+                    self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+                    answered_text = app.question_text()
+                    self.assertIn("Твой ответ", answered_text)
+                    self.assertIn("Rubric scores", answered_text)
+                    self.assertIn("Эталонный ответ", answered_text)
+                    self.assertIn("[bold]Следующее действие[/bold]", answered_text)
+                    self.assertIn("Нажми Enter для следующего вопроса", answered_text)
+            finally:
+                app.services.close()
+
+    async def test_tui_minimal_entry_states_hide_conflicting_panes_and_keep_next_action_inline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_minimal_entry_states.db"))
+            app.services.content_generation = self.QuietContentGeneration()
+            try:
+                async with app.run_test(size=(140, 36)) as pilot:
+                    input_bar = app.query_one("#input_bar", TextArea)
+                    topic = app.services.questions.list_topics()[0]
+
+                    input_bar.value = str(topic.id)
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "answering")
+                    self.assertEqual(app.query_one("#left_panel").styles.display, "none")
+                    self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+                    practice_text = app.question_text()
+                    self.assertIn("[bold]Следующее действие[/bold]", practice_text)
+                    self.assertIn("Напиши ответ обычным текстом", practice_text)
+
+                    input_bar.value = "/learn"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "learning")
+                    self.assertEqual(app.query_one("#left_panel").styles.display, "none")
+                    self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+                    learning_text = app.question_text()
+                    self.assertIn("[bold]Следующее действие[/bold]", learning_text)
+                    self.assertIn("Материал:", learning_text)
+                    self.assertIn("Реплик в диалоге: 0", learning_text)
+
+                    input_bar.value = "/system-design"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "system_design")
+                    self.assertEqual(app.query_one("#left_panel").styles.display, "none")
+                    self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+                    system_design_text = app.question_text()
+                    self.assertIn("[bold]Следующее действие[/bold]", system_design_text)
+                    self.assertIn("Начни с requirements", system_design_text)
+                    self.assertIn("Реплик в transcript: 0", system_design_text)
             finally:
                 app.services.close()
 
@@ -1102,6 +1209,193 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
 
                     self.assertEqual(app.mode, "artifacts")
                     self.assertIn("[bold cyan]Materials[/bold cyan]", app.question_text())
+            finally:
+                app.services.close()
+
+    async def test_tui_advanced_menu_back_returns_to_minimal_start_without_pane_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_advanced_menu_back.db"))
+            try:
+                async with app.run_test(size=(140, 36)) as pilot:
+                    menu = app.query_one("#main_menu", OptionList)
+                    menu.focus()
+                    menu.highlighted = 6
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "advanced_menu")
+                    self.assertEqual(app.query_one("#main_menu").styles.display, "block")
+                    self.assertEqual(app.query_one("#left_panel").styles.display, "none")
+                    self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+
+                    advanced_menu = app.query_one("#main_menu", OptionList)
+                    self.assertEqual(
+                        [option.id for option in advanced_menu.options],
+                        [
+                            "advanced-content",
+                            "advanced-materials",
+                            "advanced-questions-review",
+                            "advanced-curation-audit",
+                            "advanced-history",
+                            "advanced-commands",
+                            "advanced-back",
+                        ],
+                    )
+                    advanced_menu.focus()
+                    advanced_menu.highlighted = 6
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "select_topic")
+                    self.assertTrue(app.is_minimal_start_screen())
+                    self.assertEqual(app.query_one("#main_menu").styles.display, "block")
+                    self.assertEqual(app.query_one("#left_panel").styles.display, "block")
+                    self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+                    self.assertIn("[bold cyan]Today[/bold cyan]", app.question_text())
+                    self.assertIn("Advanced tools доступны через menu Advanced", app.question_text())
+            finally:
+                app.services.close()
+
+    async def test_tui_key_flow_navigation_returns_without_pane_overlap(self) -> None:
+        def assert_layout(mode: str, left: str, right: str, main_menu: str) -> None:
+            self.assertEqual(app.mode, mode)
+            self.assertEqual(app.query_one("#left_panel").styles.display, left)
+            self.assertEqual(app.query_one("#right_panel").styles.display, right)
+            self.assertEqual(app.query_one("#main_menu").styles.display, main_menu)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_key_flow_navigation.db"))
+            app.services.content_generation = self.QuietContentGeneration()
+            try:
+                async with app.run_test(size=(140, 36)) as pilot:
+                    input_bar = app.query_one("#input_bar", TextArea)
+                    topic = app.services.questions.list_topics()[0]
+
+                    input_bar.value = str(topic.id)
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    assert_layout("answering", "none", "none", "none")
+                    practice_session_id = app.session.id
+                    practice_question_id = app.question.id
+
+                    input_bar.value = "/learn"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    assert_layout("learning", "none", "none", "none")
+
+                    input_bar.value = "/advanced"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    assert_layout("advanced_menu", "none", "none", "block")
+                    advanced_menu = app.query_one("#main_menu", OptionList)
+                    advanced_menu.focus()
+                    advanced_menu.highlighted = 6
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    assert_layout("learning", "none", "none", "none")
+
+                    input_bar.value = "/practice"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    assert_layout("answering", "none", "none", "none")
+                    self.assertEqual(app.session.id, practice_session_id)
+                    self.assertEqual(app.question.id, practice_question_id)
+
+                    input_bar.value = "/advanced"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    assert_layout("advanced_menu", "none", "none", "block")
+                    advanced_menu = app.query_one("#main_menu", OptionList)
+                    advanced_menu.focus()
+                    advanced_menu.highlighted = 6
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    assert_layout("answering", "none", "none", "none")
+
+                    input_bar.value = "/system-design"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    assert_layout("system_design", "none", "none", "none")
+
+                    input_bar.value = "/readiness"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    assert_layout("readiness", "none", "block", "none")
+
+                    input_bar.value = "/practice"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    assert_layout("answering", "none", "none", "none")
+                    self.assertEqual(app.session.id, practice_session_id)
+                    self.assertEqual(app.question.id, practice_question_id)
+            finally:
+                app.services.close()
+
+    async def test_tui_queue_controls_stay_in_content_jobs_flow(self) -> None:
+        queue_controls = ("/pause-content", "/resume-content", "/retry-job")
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(str(Path(tmp) / "tui_queue_controls_grouping.db"))
+            app.services.content_generation = self.QuietContentGeneration()
+            try:
+                topic = app.services.repository.find_topic_by_slug("python-runtime")
+                self.assertIsNotNone(topic)
+                assert topic is not None
+
+                async with app.run_test(size=(140, 36)) as pilot:
+                    input_bar = app.query_one("#input_bar", TextArea)
+
+                    input_bar.value = str(topic.id)
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "answering")
+                    practice_surface = "\n".join(
+                        [app.question_text(), app.history_text(), app.placeholder()]
+                    )
+                    for command in queue_controls:
+                        self.assertNotIn(command, practice_surface)
+
+                    input_bar.value = "/learn"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "learning")
+                    learning_surface = "\n".join(
+                        [app.question_text(), app.history_text(), app.placeholder()]
+                    )
+                    for command in queue_controls:
+                        self.assertNotIn(command, learning_surface)
+
+                    input_bar.value = "/advanced"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "advanced_menu")
+                    advanced_surface = app.question_text()
+                    self.assertIn("Queue controls остаются внутри Content jobs", advanced_surface)
+                    self.assertIn("/pause-content", advanced_surface)
+                    self.assertIn("/resume-content", advanced_surface)
+                    self.assertIn("/retry-job <id>", advanced_surface)
+
+                    input_bar.value = "/content"
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    self.assertEqual(app.mode, "content")
+                    content_surface = "\n".join([app.question_text(), app.history_text(), app.placeholder()])
+                    self.assertIn("/pause-content", content_surface)
+                    self.assertIn("/resume-content", content_surface)
+                    self.assertIn("/retry-job <id>", content_surface)
             finally:
                 app.services.close()
 
@@ -2968,6 +3262,61 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
             finally:
                 app.services.close()
 
+    async def test_tui_startup_scheduler_starts_worker_only_for_new_jobs(self) -> None:
+        class FakeStartupScheduler:
+            def __init__(self, jobs):
+                self.jobs = jobs
+                self.calls = 0
+
+            def run_once(self, **kwargs):
+                self.calls += 1
+                return SimpleNamespace(enqueued_jobs=self.jobs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(
+                str(Path(tmp) / "tui_startup_scheduler_jobs.db"),
+                auto_start_scheduler=True,
+            )
+            scheduler = FakeStartupScheduler(
+                (
+                    SimpleNamespace(id=91, kind="question"),
+                    SimpleNamespace(id=92, kind="learning-material"),
+                )
+            )
+            app.services.content_scheduler = scheduler
+            app.start_background_content_worker = lambda: setattr(
+                app,
+                "content_status",
+                "startup worker requested",
+            )
+            try:
+                async with app.run_test(size=(120, 36)):
+                    self.assertEqual(scheduler.calls, 1)
+                    self.assertEqual(app.content_status, "startup worker requested")
+                    self.assertIn("Startup content scheduler поставил jobs", app.history_text())
+                    self.assertIn("question #91", app.history_text())
+                    self.assertIn("learning-material #92", app.history_text())
+            finally:
+                app.services.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(
+                str(Path(tmp) / "tui_startup_scheduler_no_jobs.db"),
+                auto_start_scheduler=True,
+            )
+            scheduler = FakeStartupScheduler(())
+            app.services.content_scheduler = scheduler
+            app.start_background_content_worker = lambda: self.fail(
+                "startup worker should not start without newly enqueued jobs"
+            )
+            try:
+                async with app.run_test(size=(120, 36)):
+                    self.assertEqual(scheduler.calls, 1)
+                    self.assertEqual(app.content_status, "idle")
+                    self.assertNotIn("Startup content scheduler поставил jobs", app.history_text())
+            finally:
+                app.services.close()
+
     async def test_tui_auto_queues_learning_material_when_entering_learning_mode(self) -> None:
         class FakeContentGeneration:
             def __init__(self):
@@ -4225,11 +4574,13 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(app.mode, "learning")
                 self.assertEqual(app.query_one("#left_panel").styles.display, "none")
-                self.assertEqual(app.query_one("#right_panel").styles.display, "block")
-                learning_side_panel = app.history_text()
-                self.assertIn("Learning", learning_side_panel)
-                self.assertIn("Следующее действие", learning_side_panel)
-                self.assertIn("Реплик в диалоге: 0", learning_side_panel)
+                self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+                learning_view = app.question_text()
+                self.assertIn("Режим обучения", learning_view)
+                self.assertIn("Следующее действие", learning_view)
+                self.assertIn("Напиши, что непонятно", learning_view)
+                self.assertIn("Материал:", learning_view)
+                self.assertIn("Реплик в диалоге: 0", learning_view)
 
                 input_bar.value = "Почему дескрипторы вызываются при доступе к атрибуту?"
                 await pilot.press("enter")
@@ -4261,8 +4612,8 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("enter")
                 await pilot.pause()
                 self.assertEqual(app.mode, "answering")
-                self.assertEqual(app.query_one("#left_panel").styles.display, "block")
-                self.assertEqual(app.query_one("#right_panel").styles.display, "block")
+                self.assertEqual(app.query_one("#left_panel").styles.display, "none")
+                self.assertEqual(app.query_one("#right_panel").styles.display, "none")
 
     async def test_tui_learning_mode_persists_dialog_through_service(self) -> None:
         class StaticLearningLLM:
@@ -4592,12 +4943,13 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.mode, "system_design")
                 self.assertIsNotNone(app.session)
                 self.assertEqual(app.query_one("#left_panel").styles.display, "none")
-                self.assertEqual(app.query_one("#right_panel").styles.display, "block")
-                system_design_side_panel = app.history_text()
-                self.assertIn("System design", system_design_side_panel)
-                self.assertIn("Следующее действие", system_design_side_panel)
-                self.assertIn("Начни с requirements", system_design_side_panel)
-                self.assertIn("Реплик в transcript: 0", system_design_side_panel)
+                self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+                system_design_view = app.question_text()
+                self.assertIn("System Design Mock Interview", system_design_view)
+                self.assertIn("Следующее действие", system_design_view)
+                self.assertIn("Начни с requirements", system_design_view)
+                self.assertIn("Design artifacts", system_design_view)
+                self.assertIn("Реплик в transcript: 0", system_design_view)
 
                 artifacts = [
                     ("/req SLA 99.9%, короткие ссылки доступны публично", "requirements", "SLA 99.9%"),
@@ -4622,13 +4974,12 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(app.mode, "system_design")
                 self.assertEqual(len(app.system_design_transcript), 2)
-                system_design_side_panel = app.history_text()
-                self.assertIn("Продолжай решение", system_design_side_panel)
-                self.assertIn("Реплик в transcript: 2", system_design_side_panel)
-                self.assertNotIn("Начну с требований", system_design_side_panel)
-                self.assertNotIn("уточни API", system_design_side_panel)
-                self.assertIn("Начну с требований", app.question_text())
-                self.assertIn("уточни API", app.question_text())
+                self.assertEqual(app.query_one("#right_panel").styles.display, "none")
+                system_design_view = app.question_text()
+                self.assertIn("Продолжай решение", system_design_view)
+                self.assertIn("Реплик в transcript: 2", system_design_view)
+                self.assertIn("Начну с требований", system_design_view)
+                self.assertIn("уточни API", system_design_view)
                 saved_transcript = app.services.repository.list_system_design_transcript_messages(
                     app.topic.id,
                     scenario_id=app.system_design_scenario_id,
@@ -4654,14 +5005,15 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Уровень: senior", saved_feedback[0].content)
                 self.assertEqual(saved_feedback[0].source, "llm")
                 self.assertEqual(app.services.repository.stats()["answered_count"], 0)
+                self.assertEqual(app.query_one("#right_panel").styles.display, "none")
 
                 input_bar.value = "/practice"
                 await pilot.press("enter")
                 await pilot.pause()
                 self.assertEqual(app.mode, "answering")
                 self.assertIsNotNone(app.question)
-                self.assertEqual(app.query_one("#left_panel").styles.display, "block")
-                self.assertEqual(app.query_one("#right_panel").styles.display, "block")
+                self.assertEqual(app.query_one("#left_panel").styles.display, "none")
+                self.assertEqual(app.query_one("#right_panel").styles.display, "none")
 
     async def test_tui_system_design_artifact_commands_improve_final_rubric_score(self) -> None:
         class EvaluatingSystemDesign(SystemDesignService):

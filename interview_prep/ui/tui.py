@@ -303,10 +303,13 @@ class InterviewPrepTUI(App[None]):
         self,
         db_path: str = str(DEFAULT_DB_PATH),
         config_path: str = str(DEFAULT_CONFIG_PATH),
+        *,
+        auto_start_scheduler: bool = False,
     ):
         super().__init__()
         self.db_path = db_path
         self.config_path = config_path
+        self.auto_start_scheduler = auto_start_scheduler
         self.services = AppServices(db_path, config_path)
         self.visual_mode: Literal["minimal", "advanced"] = "minimal"
         self.mode: Mode = "select_topic"
@@ -467,6 +470,7 @@ class InterviewPrepTUI(App[None]):
         self._notes_editor_widget = self.query_one("#notes_editor", TextArea)
         self.render_all()
         self.query_one("#input_bar", Composer).focus()
+        self.run_startup_content_scheduler()
 
     def on_unmount(self) -> None:
         self.content_worker.mark_unmounted()
@@ -1471,6 +1475,30 @@ class InterviewPrepTUI(App[None]):
             return
         self.content_status = f"queued {JOB_KIND_CURRICULUM} #{job.id}"
         self.add_history(f"Curriculum generation job #{job.id} поставлен в queued.")
+        self.start_background_content_worker()
+
+    def run_startup_content_scheduler(self) -> None:
+        if not self.auto_start_scheduler:
+            return
+        if self.content_worker_paused:
+            return
+        try:
+            run = self.services.content_scheduler.run_once()
+        except Exception as exc:
+            self.content_status = "scheduler failed"
+            self.add_history(f"Startup content scheduler не запущен: {exc}")
+            self.render_all()
+            return
+        jobs = run.enqueued_jobs
+        if not jobs:
+            return
+        self.content_status = f"scheduler queued {len(jobs)} job(s)"
+        job_labels = ", ".join(
+            f"{job.kind} #{job.id}" if job.id is not None else job.kind for job in jobs[:3]
+        )
+        if len(jobs) > 3:
+            job_labels = f"{job_labels}, ..."
+        self.add_history(f"Startup content scheduler поставил jobs: {job_labels}.")
         self.start_background_content_worker()
 
     def pause_content_worker(self) -> None:
@@ -3328,17 +3356,26 @@ class InterviewPrepTUI(App[None]):
 
     def apply_layout_mode(self) -> None:
         focused = self.is_focused_mode()
+        minimal_practice = self.is_minimal_practice_screen()
+        minimal_learning = self.is_minimal_learning_screen()
+        minimal_system_design = self.is_minimal_system_design_screen()
         today_actions = self.query_one("#today_actions", Horizontal)
         main_menu = self.query_one("#main_menu", OptionList)
         left_panel = self.query_one("#left_panel", VerticalScroll)
         right_panel = self.query_one("#right_panel", Vertical)
         today_actions.styles.display = "block" if self.mode == "select_topic" else "none"
         main_menu.styles.display = "block" if self.mode in {"select_topic", "advanced_menu"} else "none"
-        left_panel.styles.display = "none" if focused else "block"
+        left_panel.styles.display = "none" if focused or minimal_practice or minimal_learning or minimal_system_design else "block"
         right_panel.styles.display = "block" if self.has_right_panel() else "none"
 
     def has_right_panel(self) -> bool:
         if self.is_minimal_start_screen():
+            return False
+        if self.is_minimal_practice_screen():
+            return False
+        if self.is_minimal_learning_screen():
+            return False
+        if self.is_minimal_system_design_screen():
             return False
         if self.mode == "content":
             return True
@@ -3370,6 +3407,26 @@ class InterviewPrepTUI(App[None]):
 
     def is_minimal_start_screen(self) -> bool:
         return self.visual_mode == "minimal" and self.mode == "select_topic"
+
+    def is_minimal_practice_screen(self) -> bool:
+        return self.visual_mode == "minimal" and self.mode in {
+            "answering",
+            "scoring",
+            "answered",
+            "loading_feedback",
+        }
+
+    def is_minimal_learning_screen(self) -> bool:
+        return self.visual_mode == "minimal" and self.mode in {"learning", "loading_learning"}
+
+    def is_minimal_system_design_screen(self) -> bool:
+        return self.visual_mode == "minimal" and self.mode in {
+            "system_design",
+            "loading_system_design",
+            "loading_system_design_checkpoint",
+            "loading_system_design_pressure",
+            "loading_system_design_feedback",
+        }
 
     def is_focused_mode(self) -> bool:
         return self.mode in {
@@ -3521,7 +3578,7 @@ class InterviewPrepTUI(App[None]):
                 Option(
                     "[dim]Manual: выбери тему кликом или введи topic ID. "
                     "More modes: /learn /system-design /readiness /notebook /advanced /settings. "
-                    "Advanced: /commands.[/dim]",
+                    "Advanced tools: menu Advanced, /advanced или /commands.[/dim]",
                     disabled=True,
                 )
             )
@@ -3529,7 +3586,7 @@ class InterviewPrepTUI(App[None]):
         options.append(
             Option(
                 "[dim]/accept-topic /commands /content /questions-review /generate-curriculum /history /history learning "
-                "/pause-content /resume-content /materials /notebook(конспект) /readiness /mock-interview /notes /hint "
+                "/materials /notebook(конспект) /readiness /mock-interview /notes /hint "
                 "/answer /feedback /learn /system-design /settings /practice /skip /stats /finish-session /quit[/dim]",
                 disabled=True,
             )
@@ -3542,7 +3599,7 @@ class InterviewPrepTUI(App[None]):
                 "[dim]Manual: выбери тему слева или введи topic ID. "
                 "Mode menu: Today, Practice, Learn, Mock Interview, System Design, Readiness, Advanced, Settings. "
                 "Конспект обучения: /notebook. "
-                "Advanced/debug commands доступны через /commands.[/dim]"
+                "Advanced tools доступны через menu Advanced, /advanced или /commands.[/dim]"
                 if self.is_minimal_start_screen()
                 else (
                     "[dim]Secondary: выбери тему слева или введи topic ID. "
@@ -3613,6 +3670,8 @@ class InterviewPrepTUI(App[None]):
         status_text = self.practice_status_text()
         if status_text:
             lines.extend(["", "[bold]Статус[/bold]", status_text])
+        if self.is_minimal_practice_screen():
+            lines.extend(["", "[bold]Следующее действие[/bold]", self.practice_next_action_text()])
         if self.showing_hint:
             lines.extend(["", "[bold]Подсказка[/bold]", self.question.hint])
         if self.pending_answer_text:
@@ -4435,6 +4494,8 @@ class InterviewPrepTUI(App[None]):
             "Пиши, что непонятно, обычным текстом. ИИ отвечает как mentor, а не как интервьюер.",
             "/practice - вернуться к вопросам, /commands - список команд, /quit - завершить.",
         ]
+        if self.is_minimal_learning_screen():
+            lines.extend(["", *self.minimal_learning_context_lines()])
         if self.question is not None:
             lines.extend(["", "[bold]Контекст текущего вопроса[/bold]", self.question.prompt])
         if self.generated_learning_material:
@@ -4455,6 +4516,17 @@ class InterviewPrepTUI(App[None]):
         if self.mode == "loading_learning":
             lines.extend(["", "[bold yellow]ИИ готовит объяснение...[/bold yellow]"])
         return "\n".join(lines)
+
+    def minimal_learning_context_lines(self) -> list[str]:
+        material_status = "готов" if self.generated_learning_material else "генерируется" if self.content_worker_running else "нет"
+        return [
+            "[bold]Следующее действие[/bold]",
+            self.learning_next_action_text(),
+            "",
+            "[bold]Контекст[/bold]",
+            f"Материал: {material_status}",
+            f"Реплик в диалоге: {len(self.learning_transcript)}",
+        ]
 
     def visible_learning_transcript(self) -> tuple[list[tuple[str, str]], str]:
         total = len(self.learning_transcript)
@@ -4487,6 +4559,8 @@ class InterviewPrepTUI(App[None]):
             lines.extend(["", "[bold]Focus areas[/bold]", ", ".join(self.generated_system_design_focus_areas)])
         if self.content_worker_running and not self.generated_system_design_scenario:
             lines.extend(["", "[dim]Фоновая генерация system design scenario запущена.[/dim]"])
+        if self.is_minimal_system_design_screen():
+            lines.extend(["", *self.minimal_system_design_context_lines()])
         lines.extend([
             "",
             "[bold]Как работать[/bold]",
@@ -4527,6 +4601,24 @@ class InterviewPrepTUI(App[None]):
                 role = "ИИ" if self.last_feedback.startswith("Итоговый system design feedback") else "Интервьюер"
                 lines.append(render_chat_message(role, self.last_feedback))
         return "\n".join(lines)
+
+    def minimal_system_design_context_lines(self) -> list[str]:
+        topic = self.topic.title if self.topic else "system design"
+        scenario_status = "готов" if self.system_design_scenario != DEFAULT_SYSTEM_DESIGN_SCENARIO else "fallback"
+        if self.content_worker_running and not self.generated_system_design_scenario:
+            scenario_status = "генерируется"
+        artifact_count = sum(len(items) for items in self.system_design_artifacts.values())
+        return [
+            "[bold]Следующее действие[/bold]",
+            self.system_design_next_action_text(),
+            "",
+            "[bold]Контекст[/bold]",
+            f"Тема: {topic}",
+            f"Scenario: {scenario_status}",
+            f"Focus areas: {len(self.generated_system_design_focus_areas)}",
+            f"Artifacts: {artifact_count}",
+            f"Реплик в transcript: {len(self.system_design_transcript)}",
+        ]
 
     def missing_system_design_feedback_sections(self) -> list[str]:
         return [
@@ -5790,4 +5882,4 @@ class InterviewPrepTUI(App[None]):
 
 
 def run_tui(db_path: str = str(DEFAULT_DB_PATH), config_path: str = str(DEFAULT_CONFIG_PATH)) -> None:
-    InterviewPrepTUI(db_path, config_path).run()
+    InterviewPrepTUI(db_path, config_path, auto_start_scheduler=True).run()

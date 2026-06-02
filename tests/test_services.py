@@ -53,10 +53,25 @@ from interview_prep.infra.seed import (
 from interview_prep.infra.llm import FallbackLLMClient, LLMUnavailable, OllamaClient
 from interview_prep.infra.repositories import SQLiteRepository
 from interview_prep.services.calibration_service import CalibrationService
+from interview_prep.services.content_demand_service import (
+    CONTENT_DEMAND_ACCEPTED_QUESTIONS,
+    CONTENT_DEMAND_CANDIDATE_QUESTIONS,
+    CONTENT_DEMAND_LEARNING_MATERIALS,
+    CONTENT_DEMAND_SYSTEM_DESIGN_SCENARIOS,
+    ContentDemandService,
+)
 from interview_prep.services.content_generation_service import (
     ContentGenerationService,
+    JOB_KIND_LEARNING_MATERIAL,
+    JOB_KIND_QUESTION,
+    JOB_KIND_SYSTEM_DESIGN_SCENARIO,
     JOB_KIND_CURRICULUM,
     build_background_question_prompt,
+    parse_payload,
+)
+from interview_prep.services.content_scheduler_service import (
+    ContentSchedulerPolicy,
+    ContentSchedulerService,
 )
 from interview_prep.services.curriculum_service import CurriculumService, fallback_questions, parse_curriculum
 from interview_prep.services.evaluation_service import EvaluationService, build_rubric_evaluation_prompt
@@ -244,6 +259,13 @@ def make_repository() -> SQLiteRepository:
     repository = SQLiteRepository(connection)
     repository.seed_defaults()
     return repository
+
+
+def make_unseeded_repository() -> SQLiteRepository:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    init_db(connection)
+    return SQLiteRepository(connection)
 
 
 class ServiceTests(unittest.TestCase):
@@ -5686,6 +5708,191 @@ class ServiceTests(unittest.TestCase):
 
         self.assertIsNone(service.ensure_learning_material(topic_id, note="auto"))
         self.assertIsNone(service.ensure_system_design_scenario(topic_id, note="auto"))
+
+    def test_content_demand_model_reports_topic_stock_targets_by_mode(self) -> None:
+        repository = make_repository()
+        topic = repository.upsert_topic(
+            Topic(
+                id=None,
+                slug="scheduler-stock-topic",
+                title="Scheduler stock topic",
+                description="Topic used for content demand stock tests.",
+                level="senior",
+            )
+        )
+        repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt="Pending generated question?",
+                hint="Check candidate stock.",
+                reference_answer="Candidate question.",
+                source="background-llm",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_REVIEW,
+            )
+        )
+        repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt="Pending source-backed candidate?",
+                hint="Check source-backed candidate stock.",
+                reference_answer="Candidate question.",
+                source="source-backed",
+                source_quality_status=QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
+            )
+        )
+        service = ContentDemandService(repository)
+
+        snapshot = service.snapshot(
+            upcoming_modes=("practice", "learn", "system-design"),
+            now=datetime(2026, 6, 2, 10, 0, 0),
+        )
+
+        targets = {
+            target.kind: target
+            for target in snapshot.targets
+            if target.topic_slug == "scheduler-stock-topic"
+        }
+        self.assertEqual(targets[CONTENT_DEMAND_ACCEPTED_QUESTIONS].target_count, 4)
+        self.assertEqual(targets[CONTENT_DEMAND_ACCEPTED_QUESTIONS].current_count, 0)
+        self.assertEqual(targets[CONTENT_DEMAND_ACCEPTED_QUESTIONS].deficit, 4)
+        self.assertEqual(targets[CONTENT_DEMAND_CANDIDATE_QUESTIONS].target_count, 2)
+        self.assertEqual(targets[CONTENT_DEMAND_CANDIDATE_QUESTIONS].current_count, 2)
+        self.assertEqual(targets[CONTENT_DEMAND_CANDIDATE_QUESTIONS].deficit, 0)
+        self.assertEqual(targets[CONTENT_DEMAND_LEARNING_MATERIALS].deficit, 1)
+        self.assertEqual(targets[CONTENT_DEMAND_SYSTEM_DESIGN_SCENARIOS].deficit, 1)
+        self.assertNotIn(targets[CONTENT_DEMAND_CANDIDATE_QUESTIONS], snapshot.deficits)
+
+    def test_content_demand_model_reports_readiness_gap_competency_targets(self) -> None:
+        repository = make_repository()
+        competency = repository.upsert_competency(
+            Competency(
+                id=None,
+                slug="scheduler-gap",
+                title="Scheduler Gap",
+                description="Competency without enough linked content.",
+                category="backend",
+                level="senior",
+                order_index=0,
+            )
+        )
+        service = ContentDemandService(repository)
+
+        snapshot = service.snapshot(
+            upcoming_modes=("practice",),
+            now=datetime(2026, 6, 2, 10, 0, 0),
+        )
+
+        gap_targets = [
+            target
+            for target in snapshot.deficits
+            if target.competency_slug == competency.slug
+        ]
+        self.assertEqual(
+            {(target.kind, target.target_count, target.current_count) for target in gap_targets},
+            {
+                (CONTENT_DEMAND_ACCEPTED_QUESTIONS, 3, 0),
+                (CONTENT_DEMAND_CANDIDATE_QUESTIONS, 1, 0),
+            },
+        )
+        self.assertTrue(all(target.reason == "readiness gap: scheduler-gap" for target in gap_targets))
+
+    def test_content_scheduler_enqueues_topic_deficit_jobs_without_processing(self) -> None:
+        repository = make_unseeded_repository()
+        topic = repository.upsert_topic(
+            Topic(
+                id=None,
+                slug="scheduler-topic",
+                title="Scheduler Topic",
+                description="Topic with no generated stock.",
+                level="senior",
+            )
+        )
+        demand = ContentDemandService(repository)
+        generation = ContentGenerationService(repository, StaticLLM())
+        scheduler = ContentSchedulerService(
+            demand,
+            generation,
+            ContentSchedulerPolicy(max_jobs_per_run=3),
+        )
+
+        run = scheduler.run_once(
+            upcoming_modes=("practice", "learn", "system-design"),
+            now=datetime(2026, 6, 2, 10, 0, 0),
+        )
+
+        self.assertEqual(
+            [job.kind for job in run.enqueued_jobs],
+            [
+                JOB_KIND_QUESTION,
+                JOB_KIND_LEARNING_MATERIAL,
+                JOB_KIND_SYSTEM_DESIGN_SCENARIO,
+            ],
+        )
+        self.assertEqual(repository.list_questions(topic.id or 0), [])
+        jobs_by_kind = {job.kind: job for job in run.enqueued_jobs}
+        for job in jobs_by_kind.values():
+            self.assertEqual(job.status, "queued")
+            payload = parse_payload(job.payload_json)
+            self.assertEqual(payload["topic_id"], topic.id)
+            self.assertIn("auto-scheduler", payload["note"])
+        accepted_decisions = [
+            decision
+            for decision in run.decisions
+            if decision.target.kind == CONTENT_DEMAND_ACCEPTED_QUESTIONS
+        ]
+        self.assertEqual(len(accepted_decisions), 1)
+        self.assertEqual(accepted_decisions[0].reason, "accepted question deficit waits for curation")
+
+    def test_content_scheduler_skips_active_jobs_and_respects_run_budget(self) -> None:
+        repository = make_unseeded_repository()
+        topic = repository.upsert_topic(
+            Topic(
+                id=None,
+                slug="scheduler-budget-topic",
+                title="Scheduler Budget Topic",
+                description="Topic for active job and budget tests.",
+                level="senior",
+            )
+        )
+        demand = ContentDemandService(repository)
+        generation = ContentGenerationService(repository, StaticLLM())
+        existing_question_job = generation.enqueue_question(topic.id or 0, note="existing")
+        scheduler = ContentSchedulerService(
+            demand,
+            generation,
+            ContentSchedulerPolicy(max_jobs_per_run=1),
+        )
+
+        run = scheduler.run_once(
+            upcoming_modes=("practice", "learn", "system-design"),
+            now=datetime(2026, 6, 2, 10, 0, 0),
+        )
+
+        self.assertEqual([job.kind for job in run.enqueued_jobs], [JOB_KIND_LEARNING_MATERIAL])
+        active_question_jobs = generation.jobs_for_topic(
+            JOB_KIND_QUESTION,
+            topic.id or 0,
+            statuses={"queued", "running"},
+        )
+        self.assertEqual([job.id for job in active_question_jobs], [existing_question_job.id])
+        candidate_decisions = [
+            decision
+            for decision in run.decisions
+            if decision.target.kind == CONTENT_DEMAND_CANDIDATE_QUESTIONS
+        ]
+        self.assertEqual(len(candidate_decisions), 1)
+        self.assertEqual(candidate_decisions[0].reason, "active job already exists")
+        scenario_decisions = [
+            decision
+            for decision in run.decisions
+            if decision.target.kind == CONTENT_DEMAND_SYSTEM_DESIGN_SCENARIOS
+        ]
+        self.assertEqual(len(scenario_decisions), 1)
+        self.assertEqual(scenario_decisions[0].reason, "scheduler budget exhausted")
 
     def test_content_generation_retry_moves_failed_job_to_queue(self) -> None:
         repository = make_repository()

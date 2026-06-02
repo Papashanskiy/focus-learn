@@ -1,5 +1,81 @@
 # Development Log
 
+## 2026-06-02
+
+### Scheduler TUI startup hook
+
+- Закрыт roadmap leaf `Scheduler TUI startup hook`: реальный `run_tui()` теперь включает startup scheduler pass, который при mount вызывает `ContentSchedulerService.run_once()` и запускает существующий TUI content worker только если planner поставил новые queued jobs и worker не на паузе.
+- Тестовый boundary: `InterviewPrepTUI` по умолчанию не запускает startup scheduler, чтобы Textual regression tests не начинали реальную LLM/background генерацию; CLI/TUI entrypoint включает hook через `auto_start_scheduler=True`.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_startup_scheduler_starts_worker_only_for_new_jobs -v`, `python -m unittest tests.test_tui.TUITests.test_tui_startup_scheduler_starts_worker_only_for_new_jobs tests.test_tui.TUITests.test_tui_generate_curriculum_command_queues_job_and_starts_worker tests.test_tui.TUITests.test_tui_content_screen_retries_failed_job -v`, `python -m compileall interview_prep`.
+
+### Scheduler planner foundation
+
+- Первый open roadmap item `Background scheduler` был слишком крупным для одной итерации, поэтому он разбит в `## Next` на planner foundation, TUI startup hook, cooldown/attempt guards и model availability guard leaves.
+- Закрыт первый safe leaf: добавлен service-level `ContentSchedulerService.run_once()`, который читает `ContentDemandSnapshot` и bounded-pass ставит topic-level `question`, `learning-material` и `system-design-scenario` jobs без запуска worker и без изменения TUI flow.
+- Safety boundary: accepted-question deficits пока не создают новые jobs напрямую, потому что их закрывает curation/acceptance path; planner foundation генерирует question jobs только для candidate-question stock deficits и пропускает active duplicate jobs/budget overflow.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_content_scheduler_enqueues_topic_deficit_jobs_without_processing tests.test_services.ServiceTests.test_content_scheduler_skips_active_jobs_and_respects_run_budget -v`, `python -m unittest tests.test_services.ServiceTests.test_content_demand_model_reports_topic_stock_targets_by_mode tests.test_services.ServiceTests.test_content_demand_model_reports_readiness_gap_competency_targets tests.test_services.ServiceTests.test_content_scheduler_enqueues_topic_deficit_jobs_without_processing tests.test_services.ServiceTests.test_content_scheduler_skips_active_jobs_and_respects_run_budget -v`, `python -m compileall interview_prep`.
+
+### Always-on content demand model
+
+- Закрыт roadmap leaf `Content demand model`: добавлен read-only `ContentDemandService`, который считает target/current/deficit для accepted questions, candidate questions, learning materials и system design scenarios по topic/upcoming mode.
+- Модель также добавляет competency-level targets для top readiness gaps, чтобы следующий scheduler мог приоритизировать weak competencies без немедленной постановки jobs.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_content_demand_model_reports_topic_stock_targets_by_mode tests.test_services.ServiceTests.test_content_demand_model_reports_readiness_gap_competency_targets -v`, `python -m compileall interview_prep`.
+
+### TUI minimal/advanced docs sync
+
+- Закрыт roadmap leaf `Docs`: README описывает default minimal TUI mode, focused practice/learning/system design screens и Advanced/power-user split для service/audit/queue surfaces.
+- CLAUDE и roadmap notes синхронизированы с текущим TUI contract: first screen остается учебным Today/mode menu flow, а secondary surfaces идут через Advanced, `/advanced`, `/commands` или slash fallback.
+- Проверки: `python -m compileall interview_prep`, `rg -n "default minimal|Advanced|/advanced|focused practice|power-user|TUI minimal/advanced docs sync" README.md CLAUDE.md DEVELOPMENT_LOG.md ROADMAP.md`.
+
+### TUI tests key flow navigation
+
+- Закрыт roadmap leaf `Key flow navigation regression`: добавлен regression-тест возврата между active practice, learning, Advanced, system design, readiness и обратно к practice без наложения panes.
+- Тест фиксирует, что workflow returns сохраняют текущую practice session/question, скрывают conflicting side panels в minimal practice/learning/system design и показывают Advanced menu только внутри advanced surface.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_key_flow_navigation_returns_without_pane_overlap -v`, `python -m unittest tests.test_tui.TUITests.test_tui_key_flow_navigation_returns_without_pane_overlap tests.test_tui.TUITests.test_tui_advanced_menu_back_returns_to_minimal_start_without_pane_overlap tests.test_tui.TUITests.test_tui_minimal_entry_states_hide_conflicting_panes_and_keep_next_action_inline tests.test_tui.TUITests.test_tui_clicking_mode_actions_switches_main_workflows tests.test_tui.TUITests.test_tui_smoke_switches_today_practice_learn_system_design_readiness_practice -v`, `python -m compileall interview_prep`.
+
+### TUI tests minimal mode entry
+
+- Закрыт roadmap leaf `Minimal mode entry regression`: добавлен regression-тест входа в practice, learning и system design minimal entry states.
+- Тест проверяет, что `left_panel`/`right_panel` скрыты во всех трех entry flows, а `Следующее действие` и короткий workflow context находятся inline в center view.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_minimal_entry_states_hide_conflicting_panes_and_keep_next_action_inline tests.test_tui.TUITests.test_tui_minimal_practice_screen_hides_side_panels_and_keeps_next_action_inline tests.test_tui.TUITests.test_tui_learning_mode_does_not_save_interview_answer tests.test_tui.TUITests.test_tui_system_design_mode_runs_interviewer_flow_without_saving_answer -v`, `python -m compileall interview_prep`.
+
+### TUI tests advanced menu return
+
+- Первый open roadmap item `TUI tests` был слишком крупным для одной итерации, поэтому он разбит в `## Next` на smaller regression leaves.
+- Закрыт первый safe leaf: добавлен regression-тест, что вход в Advanced через main menu и пункт `Back` возвращают в default minimal start screen без наложения left/right side panels.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_advanced_menu_back_returns_to_minimal_start_without_pane_overlap tests.test_tui.TUITests.test_tui_advanced_menu_exposes_diagnostics_without_breaking_slash_fallbacks -v`, `python -m compileall interview_prep`.
+
+### TUI system design focus screen
+
+- Закрыт roadmap leaf `System Design focus screen`: в default minimal mode `system_design` и loading states скрывают right side panel, а center panel показывает next action, scenario/focus/artifact/transcript context, artifacts и transcript в одном focused view.
+- Regression-тест system design flow обновлен под minimal focused layout; возврат в practice сохраняет текущий minimal practice contract без side panels.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_system_design_mode_runs_interviewer_flow_without_saving_answer tests.test_tui.TUITests.test_tui_auto_queues_system_design_scenario_when_entering_mode tests.test_tui.TUITests.test_tui_reuses_saved_system_design_scenario_without_queueing_job tests.test_tui.TUIHelperTests.test_system_design_text_uses_chat_renderer_for_transcript_pending_and_feedback -v`, `python -m unittest tests.test_tui.TUITests.test_tui_minimal_practice_screen_hides_side_panels_and_keeps_next_action_inline tests.test_tui.TUITests.test_tui_learning_mode_does_not_save_interview_answer tests.test_tui.TUITests.test_tui_auto_queues_learning_material_when_entering_learning_mode tests.test_tui.TUITests.test_tui_reuses_saved_learning_material_without_queueing_job tests.test_tui.TUITests.test_tui_queue_controls_stay_in_content_jobs_flow -v`, `python -m compileall interview_prep`.
+
+### TUI learning focus screen
+
+- Первый open leaf `Learn/System Design focus screens` был слишком крупным для одной итерации, поэтому он разбит в `## Next` на отдельные learning и system design leaves.
+- Закрыт первый safe leaf: в default minimal mode `learning`/`loading_learning` скрывают right side panel, а center panel показывает next action, material status и dialog count рядом с learning material/dialog.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_learning_mode_does_not_save_interview_answer tests.test_tui.TUITests.test_tui_auto_queues_learning_material_when_entering_learning_mode tests.test_tui.TUITests.test_tui_reuses_saved_learning_material_without_queueing_job tests.test_tui.TUITests.test_tui_learning_before_topic_selection_does_not_load_saved_topic_dialog tests.test_tui.TUIHelperTests.test_learning_text_uses_chat_renderer_for_dialog_and_pending_message -v`, `python -m compileall interview_prep`.
+
+### TUI practice focus screen
+
+- Закрыт roadmap leaf `Practice focus screen`: в default minimal mode practice states `answering`/`scoring`/`answered`/`loading_feedback` скрывают left/right side panels, а center panel показывает вопрос, статус, inline next action, ответ, самооценку/rubric, эталон и feedback review по текущему шагу.
+- UX-решение: `history_text()` для practice оставлен как источник side-panel/debug текста, но видимые side panels в minimal practice flow скрыты; advanced/service surfaces не менялись.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_minimal_practice_screen_hides_side_panels_and_keeps_next_action_inline tests.test_tui.TUITests.test_tui_can_answer_one_question_and_save_score tests.test_tui.TUITests.test_tui_daily_practice_shows_ai_feedback_in_center_panel -v`, `python -m compileall interview_prep`.
+
+### TUI queue controls grouping
+
+- Закрыт roadmap leaf `Queue controls grouping`: queue worker команды `/pause-content`, `/resume-content` и `/retry-job <id>` остаются видимыми в Advanced/Content jobs flow, но больше не рекламируются в общем topic command hint и покрыты regression-тестом против появления в practice/learning surfaces.
+- `Progressive disclosure` закрыт как parent после завершения всех трех leaves: advanced menu foundation, start-screen cleanup и queue controls grouping.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_queue_controls_stay_in_content_jobs_flow tests.test_tui.TUITests.test_tui_content_screen_lists_service_jobs tests.test_tui.TUITests.test_tui_minimal_start_screen_hides_debug_panes_and_hints tests.test_tui.TUITests.test_tui_advanced_menu_exposes_diagnostics_without_breaking_slash_fallbacks -v`, `python -m compileall interview_prep`.
+
+### TUI start-screen disclosure cleanup
+
+- Закрыт roadmap leaf `Start-screen disclosure cleanup`: default minimal start screen больше не подписывает service/audit discovery как `debug` и не ведет напрямую к `/content`, `/materials`, `/questions-review`, `/curation-audit`, raw history или queue controls.
+- UX-решение: стартовый экран оставляет Today/manual topic/mode menu как primary flow, а service/audit surfaces доступны через пункт Advanced, `/advanced` или `/commands`; slash-command fallbacks не удалялись.
+- Regression-тест `test_tui_minimal_start_screen_hides_debug_panes_and_hints` расширен на `/advanced` routing, отсутствие `debug` copy и отсутствие direct service/audit/queue commands в center/topic hints.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_minimal_start_screen_hides_debug_panes_and_hints tests.test_tui.TUITests.test_tui_advanced_menu_exposes_diagnostics_without_breaking_slash_fallbacks -v`, `python -m compileall interview_prep`.
+
 ## 2026-05-28
 
 ### TUI progressive disclosure advanced menu

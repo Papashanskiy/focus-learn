@@ -13,6 +13,7 @@
 - SQLite-хранилище тем, вопросов, сессий и ответов.
 - Минимальный bootstrap тем и fallback-вопросов по Python runtime, asyncio, БД, system design и engineering quality.
 - Полноэкранный TUI workspace для ежедневной интерактивной сессии.
+- Default minimal TUI mode: стартовый Today panel, один primary action, mode menu и focused practice/learning/system design экраны без постоянных service/debug панелей.
 - Служебные CLI-команды для init/topics/questions/session/stats.
 - Режим "только вопросы".
 - Сохранение текстовых ответов, самооценки и истории сессий.
@@ -260,8 +261,9 @@ python -m interview_prep stats --db data/custom.db
 В TUI есть:
 
 - верхняя строка со статусом темы, вопроса, времени и Ollama;
-- обычный practice layout с левой панелью тем, центральной рабочей областью и правой панелью истории/feedback/notes;
-- focused layout для learning и system design режимов: боковые панели скрываются, а основная работа переносится в центральную область;
+- default minimal mode: стартовый Today panel показывает один recommended action, compact readiness/progress context и mode menu;
+- focused practice, learning и system design экраны: текущий вопрос/диалог/artifacts, следующий шаг и review context остаются в центральной области без постоянных side panels;
+- advanced/service surfaces доступны через пункт `Advanced`, `/advanced` или `/commands`; `/content`, `/materials`, `/questions-review`, `/curation-audit`, raw history и queue controls остаются power-user fallback, а не first-screen flow;
 - нижний многострочный composer для ответа и slash commands: Enter отправляет draft, Shift+Enter вставляет перенос строки, длинный draft расширяет composer до scrollable области.
 
 Команды внутри TUI:
@@ -272,6 +274,7 @@ python -m interview_prep stats --db data/custom.db
 /feedback
 /recheck-feedback
 /accept-topic
+/advanced
 /commands
 /content
 /questions-review
@@ -294,6 +297,7 @@ python -m interview_prep stats --db data/custom.db
 /save-note <title>
 /note-from-answer
 /readiness
+/settings
 /pause-content
 /resume-content
 /retry-job <id>

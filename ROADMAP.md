@@ -13,7 +13,8 @@
 - Фоновая генерация контента происходит неравномерно и может простаивать; приложению нужен always-on scheduler, который сам держит запас вопросов/материалов/scenarios по gaps и refresh policy.
 - После code review в backlog добавлены системные follow-ups: `CURRENT_SCHEMA_VERSION` теперь закреплен regression-тестом против последнего migration step, content generation retry/backoff приведен к automatic requeue контракту, а пустая legacy CLI practice session теперь завершается как `abandoned`.
 - Фоновая генерация контента уже умеет генерировать вопросы, учебные материалы и system design scenarios; TUI автоматически ставит эти задачи, показывает компактный статус очереди/последний результат в верхней строке, имеет экран `/materials` для просмотра/выбора generated artifacts и экран `/content` для списка queued/running/failed jobs, scheduled retry и безопасного manual retry failed job. Полноценное управление очередью из TUI еще не готово.
-- TUI layout уже движется к focused/mode-aware интерфейсу; стартовый экран получил selectable main menu для основных режимов, а learning dialog сохраняется с session/context metadata, восстанавливается по теме с компактной навигацией длинного диалога и доступен в history как отдельные учебные сессии.
+- Для будущего always-on scheduler добавлен read-only content demand model и первый TUI startup hook: service-level snapshot считает target/current/deficit для accepted/candidate questions, learning materials и system design scenarios по topic/upcoming modes/top readiness gaps, planner pass при запуске TUI может поставить новые jobs и запустить worker, но idle loop, cooldown/attempt guards и model availability guard еще открыты.
+- TUI layout уже движется к focused/mode-aware интерфейсу; default minimal mode описан в документации: стартовый экран показывает Today action и mode menu, practice/learning/system design держат текущую работу в центральной области, а service/debug surfaces уходят в Advanced/power-user flow.
 - Читаемость AI-диалогов в TUI уже улучшена единым renderer в learning, system design и daily practice review, но markdown из LLM пока часто отображается как сырой текст.
 - TUI теперь прогоняет LLM-authored markdown через Rich Markdown renderer для AI feedback, learning answers, system design replies и preview generated artifacts; нужны более широкие regression-тесты на markdown в чат-окнах.
 - TUI input bar заменен на многострочный composer на базе TextArea; Enter отправляет сообщение, Shift+Enter вставляет перенос строки, а composer расширяется для длинных draft до scrollable cap.
@@ -61,6 +62,18 @@
 
 ## Done
 
+- [x] Scheduler TUI startup hook: real TUI startup now runs one scheduler planner pass and starts the existing content worker only when that pass enqueues new jobs and the worker is not paused.
+- [x] Scheduler planner foundation: service-level bounded `run_once()` now turns topic-level demand deficits into queued question/material/system-design jobs without starting the worker or changing TUI flow.
+- [x] Always-on content demand model: service-level snapshot now reports target/current/deficit counts for topic practice stock, candidate questions, learning materials, system design scenarios and top readiness-gap competencies without enqueueing jobs.
+- [x] TUI minimal/advanced docs sync: README, CLAUDE and roadmap notes now describe default minimal mode, focused workflow screens and Advanced/power-user surfaces.
+- [x] TUI tests key flow navigation: regression coverage now verifies Advanced/readiness returns from active workflows do not overlap panes and preserve the active practice context.
+- [x] TUI tests minimal mode entry: regression coverage now verifies practice, learn and system-design entry states hide conflicting panes and keep next action inline.
+- [x] TUI tests advanced menu return: regression coverage now verifies Advanced menu Back returns to the minimal start screen without overlapping side panels.
+- [x] TUI system design focus screen: minimal system design now hides the right side panel and keeps next action/scenario/artifact/transcript context inline with the transcript.
+- [x] TUI practice focus screen: minimal practice now hides left/right side panels while keeping question, answer/self-score/feedback review and next action inline in the center panel.
+- [x] TUI learning focus screen: minimal learning now hides the right side panel and keeps next action/material/dialog context inline with the learning dialog.
+- [x] TUI progressive disclosure queue controls: queue worker commands now stay documented in Advanced/Content jobs while practice and learning surfaces avoid showing `/pause-content`, `/resume-content` and `/retry-job`.
+- [x] TUI progressive disclosure cleanup: minimal start-screen hints now route service/audit discovery through Advanced, `/advanced` or `/commands` without direct debug/service command prompts.
 - [x] TUI progressive disclosure: start menu now has an `Advanced` branch for content jobs, materials, question audit, curation audit, raw history and command palette while slash-command fallbacks remain available.
 - [x] TUI minimal mode layout: default minimal start screen now shows the Today task, one primary action, compact readiness/progress context and mode menu while hiding service/debug panes from the first screen.
 - [x] TUI start action simplification: minimal start screen Today action bar now exposes only the primary action button while secondary transitions stay in the mode menu or slash-command fallbacks.
@@ -384,19 +397,27 @@
 - [x] Minimal mode layout: добавить `minimal` visual mode, где default screen показывает один central task, один primary action, короткий progress/readiness signal и скрывает служебные очереди/materials/review panes.
   - [x] Start screen shell: default `minimal` start screen скрывает generic right/debug pane и service command hints для `/content`, `/materials`, `/questions-review`, сохраняя Today primary action, readiness signal и ручной выбор topic.
   - [x] Start action simplification: сократить видимый start-screen action bar до одного primary action плюс mode menu, сохранив остальные переходы доступными через menu/slash fallback.
-- [ ] Progressive disclosure: перенести `/content`, `/materials`, `/questions-review`, raw history/debug детали и queue controls в advanced menu, сохранив slash commands как power-user fallback.
+- [x] Progressive disclosure: перенести `/content`, `/materials`, `/questions-review`, raw history/debug детали и queue controls в advanced menu, сохранив slash commands как power-user fallback.
   - [x] Advanced menu foundation: добавить `Advanced` пункт в стартовое mode menu и focused advanced screen со ссылками на content jobs, materials, question audit, curation audit, history и command palette.
-  - [ ] Start-screen disclosure cleanup: убедиться, что default minimal screen ведет к service/audit surfaces только через `Advanced`/`/advanced`/`/commands`, без прямых debug hints.
-  - [ ] Queue controls grouping: оставить `/pause-content`, `/resume-content` и `/retry-job <id>` внутри content jobs/advanced flow, не показывая их в основном learning/practice flow.
-- [ ] Practice focus screen: в minimal mode показывать вопрос, ответ, feedback/self-score step и next action без перегруженных side panels.
-- [ ] Learn/System Design focus screens: в minimal mode показывать только текущий диалог/artifact и contextual next action; notebook/materials доступны через menu, а не постоянные панели.
-- [ ] TUI tests: добавить regression-тесты menu navigation, minimal mode entry, возврата в menu и отсутствия overlapping panes в ключевых flows.
-- [ ] Docs: при изменении TUI default mode обновить `README.md`, `DEVELOPMENT_LOG.md` и roadmap notes с описанием minimal/advanced modes.
+  - [x] Start-screen disclosure cleanup: убедиться, что default minimal screen ведет к service/audit surfaces только через `Advanced`/`/advanced`/`/commands`, без прямых debug hints.
+  - [x] Queue controls grouping: оставить `/pause-content`, `/resume-content` и `/retry-job <id>` внутри content jobs/advanced flow, не показывая их в основном learning/practice flow.
+- [x] Practice focus screen: в minimal mode показывать вопрос, ответ, feedback/self-score step и next action без перегруженных side panels.
+- [x] Learn focus screen: в minimal mode показывать текущий learning dialog/material и contextual next action без постоянной right panel; notebook/materials доступны через menu/slash fallback.
+- [x] System Design focus screen: в minimal mode показывать текущий system design transcript/artifacts и contextual next action без постоянной right panel; notebook/materials доступны через menu/slash fallback.
+- [x] TUI tests: добавить regression-тесты menu navigation, minimal mode entry, возврата в menu и отсутствия overlapping panes в ключевых flows.
+  - [x] Advanced menu return regression: проверить вход в Advanced через main menu и `Back` возврат на minimal start без side-panel overlap.
+  - [x] Minimal mode entry regression: проверить, что practice/learn/system-design entry states скрывают конфликтующие side panels и держат next action inline.
+  - [x] Key flow navigation regression: проверить возврат между menu/workflow surfaces без наложения panes в ключевых flows.
+- [x] Docs: при изменении TUI default mode обновить `README.md`, `DEVELOPMENT_LOG.md` и roadmap notes с описанием minimal/advanced modes.
 
 ### 0D. Always-on content generation and refresh
 
-- [ ] Content demand model: определить минимальные запасы accepted/candidate questions, learning materials и system design scenarios по competency/topic, readiness gaps и upcoming modes.
+- [x] Content demand model: определить минимальные запасы accepted/candidate questions, learning materials и system design scenarios по competency/topic, readiness gaps и upcoming modes.
 - [ ] Background scheduler: добавить always-on planner, который при запуске TUI сам ставит jobs до target запасов, учитывает cooldowns, model availability, attempts и не требует ручного `/generate-*`.
+  - [x] Scheduler planner foundation: добавить service-level bounded `run_once()`, который по `ContentDemandSnapshot` ставит topic-level `question`/`learning-material`/`system-design-scenario` jobs без запуска worker и без TUI hook.
+  - [x] Scheduler TUI startup hook: при старте TUI запускать planner pass и worker только если есть новые queued jobs и worker не на паузе.
+  - [ ] Scheduler cooldown/attempt guards: учитывать recent done/failed jobs и retry metadata, чтобы planner не ставил повторные jobs слишком часто.
+  - [ ] Scheduler model availability guard: не тратить job budget на local LLM work, если runtime явно недоступен или отключен policy.
 - [ ] Idle generation loop: продолжать генерацию, пока есть deficits и budget, даже если пользователь находится в practice/learn/menu; показывать только компактный статус в minimal mode.
 - [ ] Source refresh cadence: добавить staleness policy для source snapshots и automatic reminder/job, когда sources старше заданного периода.
 - [ ] Queue prioritization: сначала генерировать/курировать вопросы для weak competencies и canonical coverage gaps, затем materials/reference answers/scenarios.
@@ -703,7 +724,7 @@
 - TUI `/materials` уже показывает generated artifacts, версии artifacts внутри темы, latest/конкретный выбор, preview полного artifact без входа в другой режим, выбрать сохраненный material/scenario, фильтровать learning materials и system design scenarios по текущему контексту или всем темам, а также архивировать неудачные learning materials и system design scenarios через `/archive-material <id> confirm [reason]` и `/archive-scenario <id> confirm [reason]`.
 - TUI `/content` уже показывает список queued/running/failed generation jobs, `/generate-curriculum` ставит background curriculum job, TUI worker можно ставить на паузу через `/pause-content`, возобновлять через `/resume-content`, видеть scheduled retry для transient failures и безопасно возвращать failed job в queued через `/retry-job <id>`. Scheduler пока не держит постоянный запас контента без ручных команд. CLI `content-enqueue --kind reference-answer` ставит регенерацию эталонных ответов существующих вопросов темы.
 - TUI использует многострочный composer вместо однострочного input bar; Enter отправляет сообщение, Shift+Enter вставляет newline, а длинный draft расширяет composer до capped scrollable области.
-- TUI default surface уже получил minimal start layout и `Advanced` branch для служебных/audit surfaces, но progressive disclosure еще не завершен: нужно дочистить start-screen hints, queue controls grouping и focused screens для practice/learn/system design.
+- TUI default surface уже получил documented minimal start layout и `Advanced` branch для служебных/audit surfaces; start-screen hints, queue controls grouping и focused screens для practice/learn/system design закрыты, а следующий UX фокус переходит к always-on content generation.
 - Теги вопросов уже хранятся в SQLite и отображаются в CLI `questions` и TUI practice workflow; CLI `questions --tag <slug>` фильтрует список вопросов по тегу.
 - AI feedback зависит от доступности локальной Ollama; при недоступности после timeout возвращается fallback checklist.
 - Readiness dashboard и competency coverage уже есть, но их качество зависит от curated question coverage, canonical must-know questions и достаточного evidence по каждой competency.

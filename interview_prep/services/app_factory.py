@@ -5,7 +5,9 @@ from interview_prep.infra.config import DEFAULT_CONFIG_PATH, load_config
 from interview_prep.infra.database import DEFAULT_DB_PATH, connect, init_db
 from interview_prep.infra.llm import OllamaClient, ResilientLLMClient
 from interview_prep.infra.repositories import SQLiteRepository
+from interview_prep.services.content_demand_service import ContentDemandService
 from interview_prep.services.content_generation_service import ContentGenerationService
+from interview_prep.services.content_scheduler_service import ContentSchedulerService
 from interview_prep.services.calibration_service import CalibrationService
 from interview_prep.services.curriculum_service import CurriculumService
 from interview_prep.services.evaluation_service import EvaluationService
@@ -54,6 +56,8 @@ class AppServices:
         self.sessions = SessionService(self.repository, self.llm)
         self.stats = StatsService(self.repository)
         self.readiness = ReadinessService(self.repository)
+        self.content_demand = ContentDemandService(self.repository, readiness=self.readiness)
+        self.content_scheduler = ContentSchedulerService(self.content_demand, self.content_generation)
         self.interview_report = InterviewReportService(self.repository, self.readiness)
         self.read = ReadOnlyApplicationFacade(
             questions=self.questions,
