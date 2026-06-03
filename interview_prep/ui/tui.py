@@ -1478,28 +1478,35 @@ class InterviewPrepTUI(App[None]):
         self.start_background_content_worker()
 
     def run_startup_content_scheduler(self) -> None:
+        self._run_content_scheduler("Startup")
+
+    def run_idle_content_scheduler(self) -> bool:
+        return self._run_content_scheduler("Idle")
+
+    def _run_content_scheduler(self, trigger_label: str) -> bool:
         if not self.auto_start_scheduler:
-            return
+            return False
         if self.content_worker_paused:
-            return
+            return False
         try:
             run = self.services.content_scheduler.run_once()
         except Exception as exc:
             self.content_status = "scheduler failed"
-            self.add_history(f"Startup content scheduler не запущен: {exc}")
+            self.add_history(f"{trigger_label} content scheduler не запущен: {exc}")
             self.render_all()
-            return
+            return False
         jobs = run.enqueued_jobs
         if not jobs:
-            return
+            return False
         self.content_status = f"scheduler queued {len(jobs)} job(s)"
         job_labels = ", ".join(
             f"{job.kind} #{job.id}" if job.id is not None else job.kind for job in jobs[:3]
         )
         if len(jobs) > 3:
             job_labels = f"{job_labels}, ..."
-        self.add_history(f"Startup content scheduler поставил jobs: {job_labels}.")
+        self.add_history(f"{trigger_label} content scheduler поставил jobs: {job_labels}.")
         self.start_background_content_worker()
+        return True
 
     def pause_content_worker(self) -> None:
         action = self.content_worker.pause()
@@ -2440,6 +2447,8 @@ class InterviewPrepTUI(App[None]):
             for item in finish.results:
                 self.apply_background_content_result(item, last_error)
             self.content_status = finish.status
+        if self.run_idle_content_scheduler():
+            return
         self.render_all()
 
     def apply_background_content_result(self, result, last_error: str | None) -> None:
@@ -2998,6 +3007,21 @@ class InterviewPrepTUI(App[None]):
         question = self.question if self.question is not None and self.question.topic_id == topic_id else None
         self.add_history(snapshot.history_message)
         self.render_all()
+        recent_messages = []
+        if hasattr(self.services.learning, "recent_dialog_context"):
+            recent_messages = self.services.learning.recent_dialog_context(
+                topic,
+                question,
+                snapshot.learning_dialog_session_id,
+            )
+        context_summary = ""
+        if hasattr(self.services.learning, "dialog_context_summary"):
+            summary = self.services.learning.dialog_context_summary(
+                topic,
+                question,
+                snapshot.learning_dialog_session_id,
+            )
+            context_summary = summary.summary if summary is not None else ""
 
         def work() -> None:
             try:
@@ -3005,6 +3029,9 @@ class InterviewPrepTUI(App[None]):
                     user_message,
                     topic=topic,
                     question=question,
+                    dialog_session_id=snapshot.learning_dialog_session_id,
+                    recent_messages=recent_messages,
+                    context_summary=context_summary,
                 )
                 last_error = getattr(self.services.llm, "last_error", None)
             except Exception as exc:
@@ -3080,6 +3107,11 @@ class InterviewPrepTUI(App[None]):
                     title=self.learning_question,
                     dialog_session_id=self.learning_dialog_session_id,
                     source_message_id=assistant_message.id,
+                )
+            if hasattr(self.services.learning, "refresh_dialog_context_summary"):
+                self.services.learning.refresh_dialog_context_summary(
+                    self.learning_topic_id,
+                    self.learning_dialog_session_id,
                 )
         except Exception as exc:
             self.add_history(f"Не удалось сохранить учебный диалог: {exc}")

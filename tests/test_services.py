@@ -14,6 +14,7 @@ from interview_prep.domain.models import (
     CurriculumObjective,
     CurriculumSubtopic,
     CurriculumTopic,
+    LearningDialogContextSummary,
     LearningDialogMessage,
     LearningMaterial,
     ManualNote,
@@ -58,7 +59,9 @@ from interview_prep.services.content_demand_service import (
     CONTENT_DEMAND_CANDIDATE_QUESTIONS,
     CONTENT_DEMAND_LEARNING_MATERIALS,
     CONTENT_DEMAND_SYSTEM_DESIGN_SCENARIOS,
+    ContentDemandSnapshot,
     ContentDemandService,
+    ContentDemandTarget,
 )
 from interview_prep.services.content_generation_service import (
     ContentGenerationService,
@@ -66,6 +69,7 @@ from interview_prep.services.content_generation_service import (
     JOB_KIND_QUESTION,
     JOB_KIND_SYSTEM_DESIGN_SCENARIO,
     JOB_KIND_CURRICULUM,
+    JOB_KIND_SOURCE_REFRESH,
     build_background_question_prompt,
     parse_payload,
 )
@@ -75,7 +79,13 @@ from interview_prep.services.content_scheduler_service import (
 )
 from interview_prep.services.curriculum_service import CurriculumService, fallback_questions, parse_curriculum
 from interview_prep.services.evaluation_service import EvaluationService, build_rubric_evaluation_prompt
-from interview_prep.services.learning_service import LearningService, build_learning_prompt
+from interview_prep.services.learning_service import (
+    LEARNING_DIALOG_SUMMARY_CHARS,
+    RECENT_LEARNING_CONTEXT_CHARS,
+    LearningService,
+    build_learning_prompt,
+    format_recent_learning_dialog,
+)
 from interview_prep.services.question_auto_curation_service import (
     AUTO_CURATION_AUDIT_VERSION,
     AUTO_CURATION_DECISION_AUTO_ACCEPTED,
@@ -333,6 +343,7 @@ class ServiceTests(unittest.TestCase):
             "content_generation_jobs",
             "learning_materials",
             "learning_dialog_messages",
+            "learning_dialog_context_summaries",
             "notebook_entries",
             "manual_notes",
             "system_design_scenarios",
@@ -897,6 +908,19 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("source_message_id", columns)
         self.assertIn("body", columns)
 
+    def test_init_db_creates_learning_dialog_context_summary_storage(self) -> None:
+        connection = sqlite3.connect(":memory:")
+
+        init_db(connection)
+
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(learning_dialog_context_summaries)")}
+        self.assertIn("topic_id", columns)
+        self.assertIn("dialog_session_id", columns)
+        self.assertIn("summary", columns)
+        self.assertIn("covered_message_id", columns)
+        self.assertIn("covered_message_count", columns)
+        self.assertIn("updated_at", columns)
+
     def test_init_db_creates_manual_notes_storage(self) -> None:
         connection = sqlite3.connect(":memory:")
 
@@ -1327,6 +1351,24 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(snapshots[0].retrieved_at, datetime(2026, 5, 28, 9, 0, 0))
         self.assertIn("python-core", snapshots[0].category_hints)
         self.assertEqual(len(snapshots[0].checksum), 64)
+
+    def test_question_source_staleness_report_detects_missing_and_stale_snapshots(self) -> None:
+        repository = make_repository()
+        service = QuestionSourceService(repository)
+        now = datetime(2026, 6, 3, 10, 0, 0)
+
+        missing = service.staleness_report(max_age_days=30, now=now)
+        service.refresh(now=now - timedelta(days=31))
+        stale = service.staleness_report(max_age_days=30, now=now)
+        service.refresh(now=now - timedelta(days=7))
+        fresh = service.staleness_report(max_age_days=30, now=now)
+
+        self.assertTrue(missing.needs_refresh)
+        self.assertEqual(missing.missing_count, len(WHITELISTED_QUESTION_SOURCES))
+        self.assertTrue(stale.needs_refresh)
+        self.assertEqual(stale.expired_count, len(WHITELISTED_QUESTION_SOURCES))
+        self.assertFalse(fresh.needs_refresh)
+        self.assertEqual(fresh.fresh_count, len(WHITELISTED_QUESTION_SOURCES))
 
     def test_question_source_candidates_create_pending_auto_review_questions_with_metadata(self) -> None:
         repository = make_repository()
@@ -4246,6 +4288,394 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("Не оценивай пользователя", prompt)
         self.assertIn("<user_message>\nНе понимаю data descriptor\n</user_message>", prompt)
 
+    def test_learning_prompt_includes_recent_dialog_context(self) -> None:
+        now = datetime(2026, 5, 12, 10, 0, 0)
+        recent_messages = [
+            LearningDialogMessage(
+                id=1,
+                topic_id=1,
+                role="user",
+                content="Не понимаю descriptor lookup.",
+                created_at=now,
+                dialog_session_id="learn-1",
+            ),
+            LearningDialogMessage(
+                id=2,
+                topic_id=1,
+                role="assistant",
+                content="Начни с data descriptor и instance dict.",
+                created_at=now + timedelta(seconds=1),
+                dialog_session_id="learn-1",
+            ),
+        ]
+
+        prompt = build_learning_prompt("А почему property выигрывает?", recent_messages=recent_messages)
+
+        self.assertIn(
+            "<recent_learning_dialog>\n"
+            "user: Не понимаю descriptor lookup.\n"
+            "assistant: Начни с data descriptor и instance dict.\n"
+            "</recent_learning_dialog>",
+            prompt,
+        )
+        self.assertIn("<user_message>\nА почему property выигрывает?\n</user_message>", prompt)
+
+    def test_learning_prompt_includes_summary_before_recent_dialog_context(self) -> None:
+        now = datetime(2026, 5, 12, 10, 0, 0)
+        recent_messages = [
+            LearningDialogMessage(
+                id=3,
+                topic_id=1,
+                role="user",
+                content="Свежий follow-up про property.",
+                created_at=now,
+                dialog_session_id="learn-summary",
+            )
+        ]
+
+        prompt = build_learning_prompt(
+            "А что с non-data descriptor?",
+            recent_messages=recent_messages,
+            context_summary="Ранее разобрали lookup order и instance dict.",
+        )
+
+        self.assertIn(
+            "<learning_dialog_summary>\n"
+            "Ранее разобрали lookup order и instance dict.\n"
+            "</learning_dialog_summary>",
+            prompt,
+        )
+        self.assertLess(
+            prompt.index("<learning_dialog_summary>"),
+            prompt.index("<recent_learning_dialog>"),
+        )
+        self.assertIn("user: Свежий follow-up про property.", prompt)
+
+    def test_learning_prompt_limits_recent_context_budget_and_keeps_current_context(self) -> None:
+        repository = make_repository()
+        topic = repository.find_topic_by_slug("python-runtime")
+        question = repository.list_questions(topic.id)[0]
+        now = datetime(2026, 5, 12, 10, 0, 0)
+        recent_messages = [
+            LearningDialogMessage(
+                id=1,
+                topic_id=topic.id,
+                role="user",
+                content="old outside message count",
+                created_at=now,
+                dialog_session_id="learn-budget",
+            ),
+            LearningDialogMessage(
+                id=2,
+                topic_id=topic.id,
+                role="assistant",
+                content="very long earlier explanation " * 180,
+                created_at=now + timedelta(seconds=1),
+                dialog_session_id="learn-budget",
+            ),
+            LearningDialogMessage(
+                id=3,
+                topic_id=topic.id,
+                role="user",
+                content="fresh follow-up context survives",
+                created_at=now + timedelta(seconds=2),
+                dialog_session_id="learn-budget",
+            ),
+        ]
+
+        rendered = format_recent_learning_dialog(
+            recent_messages,
+            max_messages=2,
+            max_chars=120,
+            max_message_chars=80,
+        )
+        prompt = build_learning_prompt(
+            "Новый вопрос должен сохраниться полностью.",
+            topic,
+            question,
+            recent_messages=recent_messages,
+        )
+        recent_block = prompt.split("<recent_learning_dialog>\n", 1)[1].split(
+            "\n</recent_learning_dialog>",
+            1,
+        )[0]
+
+        self.assertLessEqual(len(rendered), 120)
+        self.assertIn("...[сокращено]", rendered)
+        self.assertIn("fresh follow-up context survives", rendered)
+        self.assertNotIn("old outside message count", rendered)
+        self.assertLessEqual(len(recent_block), RECENT_LEARNING_CONTEXT_CHARS)
+        self.assertIn(topic.title, prompt)
+        self.assertIn(question.prompt, prompt)
+        self.assertIn(
+            "<user_message>\nНовый вопрос должен сохраниться полностью.\n</user_message>",
+            prompt,
+        )
+
+    def test_learning_service_passes_recent_session_context_to_prompt(self) -> None:
+        repository = make_repository()
+        llm = RecordingLLM("Контекстный ответ.")
+        service = LearningService(repository, llm)
+        topic = repository.find_topic_by_slug("python-runtime")
+        other_topic = repository.find_topic_by_slug("async-backend")
+        question = repository.list_questions(topic.id)[0]
+        now = datetime(2026, 5, 12, 10, 0, 0)
+
+        for index in range(8):
+            repository.add_learning_dialog_message(
+                LearningDialogMessage(
+                    id=None,
+                    topic_id=topic.id,
+                    role="user" if index % 2 == 0 else "assistant",
+                    content=f"current session message {index}",
+                    created_at=now + timedelta(seconds=index),
+                    dialog_session_id="learn-current",
+                )
+            )
+        repository.add_learning_dialog_message(
+            LearningDialogMessage(
+                id=None,
+                topic_id=topic.id,
+                role="user",
+                content="other session message",
+                created_at=now + timedelta(seconds=20),
+                dialog_session_id="learn-other",
+            )
+        )
+        repository.add_learning_dialog_message(
+            LearningDialogMessage(
+                id=None,
+                topic_id=other_topic.id,
+                role="user",
+                content="other topic same session message",
+                created_at=now + timedelta(seconds=21),
+                dialog_session_id="learn-current",
+            )
+        )
+
+        response = service.explain(
+            "А почему это связано с property?",
+            topic=topic,
+            question=question,
+            dialog_session_id="learn-current",
+        )
+
+        prompt = llm.prompts[-1]
+        self.assertEqual(response, "Контекстный ответ.")
+        self.assertNotIn("current session message 0", prompt)
+        self.assertNotIn("current session message 1", prompt)
+        self.assertIn("current session message 2", prompt)
+        self.assertIn("current session message 7", prompt)
+        self.assertNotIn("other session message", prompt)
+        self.assertNotIn("other topic same session message", prompt)
+        self.assertIn("<user_message>\nА почему это связано с property?\n</user_message>", prompt)
+
+    def test_learning_service_keeps_two_sequential_followups_in_same_dialog_context(self) -> None:
+        repository = make_repository()
+        llm = RecordingLLM("Учебный ответ.")
+        service = LearningService(repository, llm)
+        topic = repository.find_topic_by_slug("python-runtime")
+        question = repository.list_questions(topic.id)[0]
+
+        def recent_block(prompt: str) -> str:
+            return prompt.split("<recent_learning_dialog>\n", 1)[1].split(
+                "\n</recent_learning_dialog>",
+                1,
+            )[0]
+
+        service.explain_and_save(
+            topic.id,
+            "Разбери descriptor lookup.",
+            topic=topic,
+            question=question,
+            dialog_session_id="learn-sequential",
+        )
+        service.explain_and_save(
+            topic.id,
+            "Почему property выигрывает?",
+            topic=topic,
+            question=question,
+            dialog_session_id="learn-sequential",
+        )
+        service.explain_and_save(
+            topic.id,
+            "А чем non-data descriptor отличается?",
+            topic=topic,
+            question=question,
+            dialog_session_id="learn-sequential",
+        )
+
+        first_prompt, first_followup_prompt, second_followup_prompt = llm.prompts
+        first_followup_recent = recent_block(first_followup_prompt)
+        second_followup_recent = recent_block(second_followup_prompt)
+        messages = repository.list_learning_dialog_messages_for_session("learn-sequential")
+
+        self.assertIn("Нет предыдущих реплик", recent_block(first_prompt))
+        self.assertIn("Разбери descriptor lookup.", first_followup_recent)
+        self.assertIn("Учебный ответ.", first_followup_recent)
+        self.assertNotIn("Почему property выигрывает?", first_followup_recent)
+        self.assertIn(
+            "<user_message>\nПочему property выигрывает?\n</user_message>",
+            first_followup_prompt,
+        )
+        self.assertIn("Разбери descriptor lookup.", second_followup_recent)
+        self.assertIn("Почему property выигрывает?", second_followup_recent)
+        self.assertNotIn("А чем non-data descriptor отличается?", second_followup_recent)
+        self.assertIn(
+            "<user_message>\nА чем non-data descriptor отличается?\n</user_message>",
+            second_followup_prompt,
+        )
+        self.assertEqual(
+            [message.role for message in messages],
+            ["user", "assistant", "user", "assistant", "user", "assistant"],
+        )
+
+    def test_learning_service_separates_topicless_topic_and_session_contexts(self) -> None:
+        repository = make_repository()
+        llm = RecordingLLM("Контекстный ответ.")
+        service = LearningService(repository, llm)
+        topic = repository.find_topic_by_slug("python-runtime")
+        other_topic = repository.find_topic_by_slug("async-backend")
+        now = datetime(2026, 5, 12, 10, 0, 0)
+
+        def recent_block(prompt: str) -> str:
+            return prompt.split("<recent_learning_dialog>\n", 1)[1].split(
+                "\n</recent_learning_dialog>",
+                1,
+            )[0]
+
+        repository.add_learning_dialog_message(
+            LearningDialogMessage(
+                id=None,
+                topic_id=topic.id,
+                role="user",
+                content="topic-bound descriptor context",
+                created_at=now,
+                dialog_session_id="learn-shared",
+            )
+        )
+        repository.add_learning_dialog_message(
+            LearningDialogMessage(
+                id=None,
+                topic_id=topic.id,
+                role="assistant",
+                content="topic-bound assistant context",
+                created_at=now + timedelta(seconds=1),
+                dialog_session_id="learn-shared",
+            )
+        )
+        repository.add_learning_dialog_message(
+            LearningDialogMessage(
+                id=None,
+                topic_id=other_topic.id,
+                role="user",
+                content="other topic backpressure context",
+                created_at=now + timedelta(seconds=2),
+                dialog_session_id="learn-shared",
+            )
+        )
+        repository.add_learning_dialog_message(
+            LearningDialogMessage(
+                id=None,
+                topic_id=topic.id,
+                role="user",
+                content="other session descriptor context",
+                created_at=now + timedelta(seconds=3),
+                dialog_session_id="learn-other-session",
+            )
+        )
+
+        topicless_context = service.recent_dialog_context(None, None, "learn-shared")
+        service.explain("Пока без выбранной темы.", dialog_session_id="learn-shared")
+        topicless_prompt = llm.prompts[-1]
+        service.explain("Вернемся к descriptor lookup.", topic=topic, dialog_session_id="learn-shared")
+        topic_prompt = llm.prompts[-1]
+        service.explain("Новая session по той же теме.", topic=topic, dialog_session_id="learn-other-session")
+        other_session_prompt = llm.prompts[-1]
+
+        self.assertEqual(topicless_context, [])
+        self.assertIn("Нет предыдущих реплик", recent_block(topicless_prompt))
+        self.assertNotIn("topic-bound descriptor context", topicless_prompt)
+        self.assertNotIn("other topic backpressure context", topicless_prompt)
+        self.assertIn("topic-bound descriptor context", recent_block(topic_prompt))
+        self.assertIn("topic-bound assistant context", recent_block(topic_prompt))
+        self.assertNotIn("other topic backpressure context", recent_block(topic_prompt))
+        self.assertNotIn("other session descriptor context", recent_block(topic_prompt))
+        self.assertIn("other session descriptor context", recent_block(other_session_prompt))
+        self.assertNotIn("topic-bound descriptor context", recent_block(other_session_prompt))
+
+    def test_learning_service_compacts_older_dialog_messages_for_next_prompt(self) -> None:
+        repository = make_repository()
+        llm = RecordingLLM("Контекстный ответ.")
+        service = LearningService(repository, llm)
+        topic = repository.find_topic_by_slug("python-runtime")
+        question = repository.list_questions(topic.id)[0]
+        now = datetime(2026, 5, 12, 10, 0, 0)
+
+        for index in range(8):
+            repository.add_learning_dialog_message(
+                LearningDialogMessage(
+                    id=None,
+                    topic_id=topic.id,
+                    role="user" if index % 2 == 0 else "assistant",
+                    content=f"older dialog detail {index}",
+                    created_at=now + timedelta(seconds=index),
+                    dialog_session_id="learn-compact",
+                )
+            )
+
+        summary = service.refresh_dialog_context_summary(topic.id, "learn-compact")
+        response = service.explain(
+            "Как это связано с non-data descriptors?",
+            topic=topic,
+            question=question,
+            dialog_session_id="learn-compact",
+        )
+
+        prompt = llm.prompts[-1]
+        self.assertIsNotNone(summary)
+        self.assertEqual(response, "Контекстный ответ.")
+        self.assertIn("older dialog detail 0", summary.summary)
+        self.assertIn("older dialog detail 1", summary.summary)
+        self.assertLessEqual(len(summary.summary), LEARNING_DIALOG_SUMMARY_CHARS)
+        self.assertIn("<learning_dialog_summary>\n", prompt)
+        self.assertIn("older dialog detail 0", prompt)
+        self.assertIn("older dialog detail 7", prompt)
+        self.assertIn("<user_message>\nКак это связано с non-data descriptors?\n</user_message>", prompt)
+
+    def test_learning_service_updates_compaction_summary_after_saved_exchange(self) -> None:
+        repository = make_repository()
+        service = LearningService(repository, StaticLLM())
+        topic = repository.find_topic_by_slug("python-runtime")
+        question = repository.list_questions(topic.id)[0]
+        now = datetime(2026, 5, 12, 10, 0, 0)
+
+        for index in range(6):
+            repository.add_learning_dialog_message(
+                LearningDialogMessage(
+                    id=None,
+                    topic_id=topic.id,
+                    role="user" if index % 2 == 0 else "assistant",
+                    content=f"seed dialog detail {index}",
+                    created_at=now + timedelta(seconds=index),
+                    dialog_session_id="learn-save-compact",
+                )
+            )
+
+        service.explain_and_save(
+            topic.id,
+            "Почему property считается data descriptor?",
+            topic=topic,
+            question=question,
+            dialog_session_id="learn-save-compact",
+        )
+
+        summary = service.dialog_context_summary(topic, question, "learn-save-compact")
+        self.assertIsNotNone(summary)
+        self.assertIn("seed dialog detail 0", summary.summary)
+        self.assertIn("seed dialog detail 1", summary.summary)
+        self.assertEqual(summary.covered_message_count, 2)
+
     def test_repository_persists_learning_dialog_messages_by_topic(self) -> None:
         repository = make_repository()
         topic = repository.find_topic_by_slug("python-runtime")
@@ -4285,6 +4715,53 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([message.role for message in messages], ["user", "assistant"])
         self.assertEqual(messages[0].content, "Не понимаю descriptor protocol.")
         self.assertEqual(messages[1].content, "Начни с __get__, __set__ и lookup order.")
+
+    def test_repository_upserts_learning_dialog_context_summary(self) -> None:
+        repository = make_repository()
+        topic = repository.find_topic_by_slug("python-runtime")
+        first_message = repository.add_learning_dialog_message(
+            LearningDialogMessage(
+                id=None,
+                topic_id=topic.id,
+                role="user",
+                content="Первый вопрос.",
+                created_at=datetime(2026, 5, 12, 10, 0, 0),
+                dialog_session_id="learn-summary-upsert",
+            )
+        )
+        created = datetime(2026, 5, 12, 10, 1, 0)
+        updated = repository.upsert_learning_dialog_context_summary(
+            LearningDialogContextSummary(
+                id=None,
+                topic_id=topic.id,
+                dialog_session_id="learn-summary-upsert",
+                summary="Первая сводка.",
+                covered_message_id=first_message.id,
+                covered_message_count=1,
+                created_at=created,
+                updated_at=created,
+            )
+        )
+
+        second = repository.upsert_learning_dialog_context_summary(
+            LearningDialogContextSummary(
+                id=None,
+                topic_id=topic.id,
+                dialog_session_id="learn-summary-upsert",
+                summary="Обновленная сводка.",
+                covered_message_id=first_message.id,
+                covered_message_count=2,
+                created_at=created + timedelta(minutes=1),
+                updated_at=created + timedelta(minutes=1),
+            )
+        )
+        fetched = repository.get_learning_dialog_context_summary("learn-summary-upsert", topic.id)
+
+        self.assertEqual(updated.id, second.id)
+        self.assertEqual(fetched.summary, "Обновленная сводка.")
+        self.assertEqual(fetched.covered_message_count, 2)
+        self.assertEqual(fetched.created_at, created)
+        self.assertEqual(fetched.updated_at, created + timedelta(minutes=1))
 
     def test_repository_lists_recent_learning_dialog_messages_in_reading_order(self) -> None:
         repository = make_repository()
@@ -5156,6 +5633,23 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(status.curriculum_topic_count, 1)
         self.assertEqual(status.question_count, 1)
 
+    def test_content_generation_source_refresh_job_persists_snapshots(self) -> None:
+        repository = make_repository()
+        service = ContentGenerationService(repository, StaticLLM())
+
+        job = service.enqueue_source_refresh(note="scheduler source cadence")
+        result = service.process_next_job()
+        snapshots = repository.list_question_source_snapshots()
+
+        self.assertEqual(job.kind, JOB_KIND_SOURCE_REFRESH)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.job.status, "done")
+        self.assertIsNone(result.created_question)
+        self.assertIsNotNone(result.artifact)
+        self.assertEqual(result.artifact["kind"], JOB_KIND_SOURCE_REFRESH)
+        self.assertEqual(result.artifact["saved_count"], len(WHITELISTED_QUESTION_SOURCES))
+        self.assertEqual(len(snapshots), len(WHITELISTED_QUESTION_SOURCES))
+
     def test_content_generation_retry_respects_active_job_limit(self) -> None:
         repository = make_repository()
         service = ContentGenerationService(repository, StaticLLM())
@@ -5847,6 +6341,230 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len(accepted_decisions), 1)
         self.assertEqual(accepted_decisions[0].reason, "accepted question deficit waits for curation")
 
+    def test_content_scheduler_maps_readiness_gap_competency_to_topic_question_job(self) -> None:
+        repository = make_unseeded_repository()
+        topic = repository.upsert_topic(
+            Topic(
+                id=None,
+                slug="scheduler-gap-topic",
+                title="Scheduler Gap Topic",
+                description="Topic linked to a weak competency.",
+                level="senior",
+            )
+        )
+        competency = repository.upsert_competency(
+            Competency(
+                id=None,
+                slug="scheduler-gap-mapped",
+                title="Scheduler Gap Mapped",
+                description="Weak competency with an existing topic mapping.",
+                category="backend",
+                level="senior",
+                order_index=0,
+            )
+        )
+        question = repository.add_question(
+            Question(
+                id=None,
+                topic_id=topic.id or 0,
+                difficulty="senior",
+                prompt="How should the scheduler map this weak competency?",
+                hint="Use the existing linked topic.",
+                reference_answer="Generate more candidate questions for the mapped topic.",
+                source="test",
+            )
+        )
+        repository.set_question_competencies(
+            question.id or 0,
+            [QuestionCompetencyLink(competency=competency, is_primary=True)],
+        )
+        scheduler = ContentSchedulerService(
+            ContentDemandService(repository),
+            ContentGenerationService(repository, StaticLLM()),
+            ContentSchedulerPolicy(max_jobs_per_run=1),
+        )
+
+        run = scheduler.run_once(upcoming_modes=("practice",), now=datetime(2026, 6, 3, 10, 0, 0))
+
+        self.assertEqual([job.kind for job in run.enqueued_jobs], [JOB_KIND_QUESTION])
+        payload = parse_payload(run.enqueued_jobs[0].payload_json)
+        self.assertEqual(payload["topic_id"], topic.id)
+        self.assertIn("readiness gap: scheduler-gap-mapped", payload["note"])
+        mapped_decision = next(
+            decision
+            for decision in run.decisions
+            if decision.target.kind == CONTENT_DEMAND_CANDIDATE_QUESTIONS
+            and decision.target.competency_slug == competency.slug
+        )
+        self.assertEqual(mapped_decision.reason, "deficit queued")
+        self.assertEqual(mapped_decision.target.topic_slug, topic.slug)
+
+    def test_content_scheduler_prioritizes_question_jobs_before_artifacts(self) -> None:
+        repository = make_unseeded_repository()
+        topic = repository.upsert_topic(
+            Topic(
+                id=None,
+                slug="scheduler-priority-topic",
+                title="Scheduler Priority Topic",
+                description="Topic for queue priority tests.",
+                level="senior",
+            )
+        )
+
+        class MisorderedDemand:
+            def snapshot(self, *, upcoming_modes=None, now=None) -> ContentDemandSnapshot:
+                return ContentDemandSnapshot(
+                    generated_at=now or datetime(2026, 6, 3, 10, 0, 0),
+                    targets=(
+                        ContentDemandTarget(
+                            kind=CONTENT_DEMAND_LEARNING_MATERIALS,
+                            target_count=1,
+                            current_count=0,
+                            reason="learn mode stock",
+                            priority=1,
+                            topic_id=topic.id,
+                            topic_slug=topic.slug,
+                            topic_title=topic.title,
+                            upcoming_mode="learn",
+                        ),
+                        ContentDemandTarget(
+                            kind=CONTENT_DEMAND_SYSTEM_DESIGN_SCENARIOS,
+                            target_count=1,
+                            current_count=0,
+                            reason="system design mode stock",
+                            priority=2,
+                            topic_id=topic.id,
+                            topic_slug=topic.slug,
+                            topic_title=topic.title,
+                            upcoming_mode="system-design",
+                        ),
+                        ContentDemandTarget(
+                            kind=CONTENT_DEMAND_CANDIDATE_QUESTIONS,
+                            target_count=2,
+                            current_count=0,
+                            reason="curation candidate stock",
+                            priority=500,
+                            topic_id=topic.id,
+                            topic_slug=topic.slug,
+                            topic_title=topic.title,
+                            upcoming_mode="practice",
+                        ),
+                    ),
+                )
+
+        scheduler = ContentSchedulerService(
+            MisorderedDemand(),
+            ContentGenerationService(repository, StaticLLM()),
+            ContentSchedulerPolicy(max_jobs_per_run=1),
+        )
+
+        run = scheduler.run_once(
+            upcoming_modes=("practice", "learn", "system-design"),
+            now=datetime(2026, 6, 3, 10, 0, 0),
+        )
+
+        self.assertEqual([job.kind for job in run.enqueued_jobs], [JOB_KIND_QUESTION])
+        budgeted_artifact_decisions = [
+            decision
+            for decision in run.decisions
+            if decision.target.kind
+            in {CONTENT_DEMAND_LEARNING_MATERIALS, CONTENT_DEMAND_SYSTEM_DESIGN_SCENARIOS}
+        ]
+        self.assertEqual(
+            [decision.reason for decision in budgeted_artifact_decisions],
+            ["scheduler budget exhausted", "scheduler budget exhausted"],
+        )
+
+    def test_content_scheduler_prioritizes_source_coverage_before_artifacts(self) -> None:
+        repository = make_unseeded_repository()
+        topic = repository.upsert_topic(
+            Topic(
+                id=None,
+                slug="scheduler-source-priority-topic",
+                title="Scheduler Source Priority Topic",
+                description="Topic for source coverage queue priority tests.",
+                level="senior",
+            )
+        )
+
+        class MisorderedDemand:
+            def snapshot(self, *, upcoming_modes=None, now=None) -> ContentDemandSnapshot:
+                return ContentDemandSnapshot(
+                    generated_at=now or datetime(2026, 6, 3, 10, 0, 0),
+                    targets=(
+                        ContentDemandTarget(
+                            kind=CONTENT_DEMAND_LEARNING_MATERIALS,
+                            target_count=1,
+                            current_count=0,
+                            reason="learn mode stock",
+                            priority=1,
+                            topic_id=topic.id,
+                            topic_slug=topic.slug,
+                            topic_title=topic.title,
+                            upcoming_mode="learn",
+                        ),
+                        ContentDemandTarget(
+                            kind=CONTENT_DEMAND_SYSTEM_DESIGN_SCENARIOS,
+                            target_count=1,
+                            current_count=0,
+                            reason="system design mode stock",
+                            priority=2,
+                            topic_id=topic.id,
+                            topic_slug=topic.slug,
+                            topic_title=topic.title,
+                            upcoming_mode="system-design",
+                        ),
+                        ContentDemandTarget(
+                            kind=JOB_KIND_SOURCE_REFRESH,
+                            target_count=1,
+                            current_count=0,
+                            reason="source curation coverage",
+                            priority=500,
+                            topic_id=0,
+                            topic_slug="source-refresh",
+                            topic_title="Question sources",
+                            upcoming_mode="source-refresh",
+                        ),
+                        ContentDemandTarget(
+                            kind=CONTENT_DEMAND_CANDIDATE_QUESTIONS,
+                            target_count=2,
+                            current_count=0,
+                            reason="curation candidate stock",
+                            priority=600,
+                            topic_id=topic.id,
+                            topic_slug=topic.slug,
+                            topic_title=topic.title,
+                            upcoming_mode="practice",
+                        ),
+                    ),
+                )
+
+        scheduler = ContentSchedulerService(
+            MisorderedDemand(),
+            ContentGenerationService(repository, StaticLLM()),
+            ContentSchedulerPolicy(max_jobs_per_run=2),
+        )
+
+        run = scheduler.run_once(
+            upcoming_modes=("practice", "learn", "system-design"),
+            now=datetime(2026, 6, 3, 10, 0, 0),
+        )
+
+        self.assertEqual(
+            [job.kind for job in run.enqueued_jobs],
+            [JOB_KIND_QUESTION, JOB_KIND_SOURCE_REFRESH],
+        )
+        budgeted_artifact_decisions = [
+            decision
+            for decision in run.decisions
+            if decision.target.kind
+            in {CONTENT_DEMAND_LEARNING_MATERIALS, CONTENT_DEMAND_SYSTEM_DESIGN_SCENARIOS}
+        ]
+        self.assertEqual(
+            [decision.reason for decision in budgeted_artifact_decisions],
+            ["scheduler budget exhausted", "scheduler budget exhausted"],
+        )
+
     def test_content_scheduler_skips_active_jobs_and_respects_run_budget(self) -> None:
         repository = make_unseeded_repository()
         topic = repository.upsert_topic(
@@ -5893,6 +6611,226 @@ class ServiceTests(unittest.TestCase):
         ]
         self.assertEqual(len(scenario_decisions), 1)
         self.assertEqual(scenario_decisions[0].reason, "scheduler budget exhausted")
+
+    def test_content_scheduler_skips_recent_done_and_failed_jobs_until_cooldown(self) -> None:
+        repository = make_unseeded_repository()
+        topic = repository.upsert_topic(
+            Topic(
+                id=None,
+                slug="scheduler-cooldown-topic",
+                title="Scheduler Cooldown Topic",
+                description="Topic for recent attempt guard tests.",
+                level="senior",
+            )
+        )
+        demand = ContentDemandService(repository)
+        generation = ContentGenerationService(repository, StaticLLM())
+        done_question_job = generation.enqueue_question(topic.id or 0, note="recent done")
+        failed_material_job = generation.enqueue_learning_material(topic.id or 0, note="recent failed")
+        repository.update_content_generation_job(done_question_job.id or 0, "done")
+        repository.update_content_generation_job(failed_material_job.id or 0, "failed", error="local model timeout")
+        recent_done = repository.get_content_generation_job(done_question_job.id or 0)
+        self.assertIsNotNone(recent_done)
+        assert recent_done is not None
+        scheduler = ContentSchedulerService(
+            demand,
+            generation,
+            ContentSchedulerPolicy(
+                max_jobs_per_run=3,
+                completed_job_cooldown_seconds=60,
+                failed_job_cooldown_seconds=60,
+            ),
+        )
+
+        blocked_run = scheduler.run_once(
+            upcoming_modes=("practice", "learn", "system-design"),
+            now=recent_done.updated_at,
+        )
+        expired_run = scheduler.run_once(
+            upcoming_modes=("practice", "learn", "system-design"),
+            now=recent_done.updated_at + timedelta(seconds=61),
+        )
+
+        blocked_reasons = {
+            decision.target.kind: decision.reason
+            for decision in blocked_run.decisions
+            if decision.target.topic_slug == "scheduler-cooldown-topic"
+        }
+        self.assertEqual(
+            blocked_reasons[CONTENT_DEMAND_CANDIDATE_QUESTIONS],
+            "recent completed job cooldown",
+        )
+        self.assertEqual(
+            blocked_reasons[CONTENT_DEMAND_LEARNING_MATERIALS],
+            "recent failed job cooldown",
+        )
+        self.assertEqual([job.kind for job in blocked_run.enqueued_jobs], [JOB_KIND_SYSTEM_DESIGN_SCENARIO])
+        self.assertIn(JOB_KIND_QUESTION, [job.kind for job in expired_run.enqueued_jobs])
+        self.assertIn(JOB_KIND_LEARNING_MATERIAL, [job.kind for job in expired_run.enqueued_jobs])
+
+    def test_content_scheduler_skips_queued_retry_backoff_job(self) -> None:
+        repository = make_unseeded_repository()
+        topic = repository.upsert_topic(
+            Topic(
+                id=None,
+                slug="scheduler-retry-topic",
+                title="Scheduler Retry Topic",
+                description="Topic for retry backoff guard tests.",
+                level="senior",
+            )
+        )
+        demand = ContentDemandService(repository)
+        generation = ContentGenerationService(repository, StaticLLM())
+        retry_job = generation.enqueue_question(topic.id or 0, note="retrying")
+        payload = parse_payload(retry_job.payload_json)
+        now = datetime(2026, 6, 3, 10, 0, 0)
+        payload["retry"]["attempt"] = 1
+        payload["retry"]["next_attempt_at"] = (now + timedelta(minutes=5)).isoformat(timespec="seconds")
+        repository.update_content_generation_job_payload(
+            retry_job.id or 0,
+            json.dumps(payload, ensure_ascii=False),
+        )
+        scheduler = ContentSchedulerService(
+            demand,
+            generation,
+            ContentSchedulerPolicy(max_jobs_per_run=3),
+        )
+
+        run = scheduler.run_once(upcoming_modes=("practice",), now=now)
+
+        candidate_decisions = [
+            decision
+            for decision in run.decisions
+            if decision.target.topic_slug == "scheduler-retry-topic"
+            and decision.target.kind == CONTENT_DEMAND_CANDIDATE_QUESTIONS
+        ]
+        active_question_jobs = generation.jobs_for_topic(
+            JOB_KIND_QUESTION,
+            topic.id or 0,
+            statuses={"queued", "running"},
+        )
+        self.assertEqual(len(candidate_decisions), 1)
+        self.assertEqual(candidate_decisions[0].reason, "retry backoff already scheduled")
+        self.assertEqual([job.id for job in active_question_jobs], [retry_job.id])
+
+    def test_content_scheduler_skips_llm_jobs_when_model_unavailable_or_disabled(self) -> None:
+        repository = make_unseeded_repository()
+        topic = repository.upsert_topic(
+            Topic(
+                id=None,
+                slug="scheduler-model-guard-topic",
+                title="Scheduler Model Guard Topic",
+                description="Topic for local LLM availability guard tests.",
+                level="senior",
+            )
+        )
+        demand = ContentDemandService(repository)
+        generation = ContentGenerationService(repository, StaticLLM())
+        unavailable_scheduler = ContentSchedulerService(
+            demand,
+            generation,
+            ContentSchedulerPolicy(
+                max_jobs_per_run=1,
+                local_llm_available=lambda: False,
+            ),
+        )
+
+        unavailable_run = unavailable_scheduler.run_once(
+            upcoming_modes=("practice", "learn", "system-design"),
+            now=datetime(2026, 6, 3, 10, 0, 0),
+        )
+
+        self.assertEqual(unavailable_run.enqueued_jobs, ())
+        self.assertEqual(repository.list_content_generation_jobs(limit=10), [])
+        unavailable_reasons = {
+            decision.target.kind: decision.reason
+            for decision in unavailable_run.decisions
+            if decision.target.topic_slug == topic.slug
+        }
+        self.assertEqual(
+            unavailable_reasons[CONTENT_DEMAND_ACCEPTED_QUESTIONS],
+            "accepted question deficit waits for curation",
+        )
+        self.assertEqual(
+            unavailable_reasons[CONTENT_DEMAND_CANDIDATE_QUESTIONS],
+            "local LLM runtime unavailable",
+        )
+        self.assertEqual(
+            unavailable_reasons[CONTENT_DEMAND_LEARNING_MATERIALS],
+            "local LLM runtime unavailable",
+        )
+        self.assertEqual(
+            unavailable_reasons[CONTENT_DEMAND_SYSTEM_DESIGN_SCENARIOS],
+            "local LLM runtime unavailable",
+        )
+
+        disabled_scheduler = ContentSchedulerService(
+            demand,
+            generation,
+            ContentSchedulerPolicy(
+                max_jobs_per_run=3,
+                local_llm_work_enabled=False,
+            ),
+        )
+
+        disabled_run = disabled_scheduler.run_once(
+            upcoming_modes=("practice", "learn", "system-design"),
+            now=datetime(2026, 6, 3, 10, 0, 0),
+        )
+
+        self.assertEqual(disabled_run.enqueued_jobs, ())
+        self.assertEqual(repository.list_content_generation_jobs(limit=10), [])
+        disabled_reasons = {
+            decision.target.kind: decision.reason
+            for decision in disabled_run.decisions
+            if decision.target.topic_slug == topic.slug
+        }
+        self.assertEqual(
+            disabled_reasons[CONTENT_DEMAND_CANDIDATE_QUESTIONS],
+            "local LLM generation disabled by policy",
+        )
+        self.assertEqual(
+            disabled_reasons[CONTENT_DEMAND_LEARNING_MATERIALS],
+            "local LLM generation disabled by policy",
+        )
+        self.assertEqual(
+            disabled_reasons[CONTENT_DEMAND_SYSTEM_DESIGN_SCENARIOS],
+            "local LLM generation disabled by policy",
+        )
+
+    def test_content_scheduler_enqueues_source_refresh_when_snapshots_are_stale(self) -> None:
+        repository = make_unseeded_repository()
+        scheduler = ContentSchedulerService(
+            ContentDemandService(repository),
+            ContentGenerationService(repository, StaticLLM()),
+            ContentSchedulerPolicy(
+                max_jobs_per_run=1,
+                local_llm_available=lambda: False,
+                source_refresh_enabled=True,
+                source_refresh_staleness_days=30,
+            ),
+        )
+
+        run = scheduler.run_once(now=datetime(2026, 6, 3, 10, 0, 0))
+
+        self.assertEqual([job.kind for job in run.enqueued_jobs], [JOB_KIND_SOURCE_REFRESH])
+        self.assertEqual(repository.list_content_generation_jobs(limit=1)[0].kind, JOB_KIND_SOURCE_REFRESH)
+        self.assertEqual(run.enqueued_jobs[0].status, "queued")
+        self.assertIn("source refresh cadence", run.decisions[0].reason)
+
+    def test_content_scheduler_skips_source_refresh_when_snapshots_are_fresh(self) -> None:
+        repository = make_unseeded_repository()
+        QuestionSourceService(repository).refresh(now=datetime(2026, 6, 2, 10, 0, 0))
+        scheduler = ContentSchedulerService(
+            ContentDemandService(repository),
+            ContentGenerationService(repository, StaticLLM()),
+            ContentSchedulerPolicy(source_refresh_enabled=True, source_refresh_staleness_days=30),
+        )
+
+        run = scheduler.run_once(now=datetime(2026, 6, 3, 10, 0, 0))
+
+        self.assertEqual(run.enqueued_jobs, ())
+        self.assertEqual(repository.list_content_generation_jobs(limit=10), [])
 
     def test_content_generation_retry_moves_failed_job_to_queue(self) -> None:
         repository = make_repository()

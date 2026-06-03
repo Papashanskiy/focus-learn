@@ -21,6 +21,7 @@ from interview_prep.services.content_generation_service import (
     JOB_KIND_CURRICULUM,
     JOB_KIND_LEARNING_MATERIAL,
     JOB_KIND_REFERENCE_ANSWER,
+    JOB_KIND_SOURCE_REFRESH,
     JOB_KIND_SYSTEM_DESIGN_SCENARIO,
 )
 from interview_prep.services.session_service import (
@@ -481,6 +482,9 @@ def content_artifact_id_label(kind: str, artifact: dict) -> str:
         if topic_count is not None and questions_saved is not None:
             return f"curriculum:{topic_count}t/{questions_saved}q"
         return "curriculum"
+    if kind == JOB_KIND_SOURCE_REFRESH:
+        source_count = artifact.get("source_count")
+        return f"sources:{source_count}" if source_count else "sources"
     return ""
 
 

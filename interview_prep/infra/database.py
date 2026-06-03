@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 
 DEFAULT_DB_PATH = Path("data/interview_prep.db")
-CURRENT_SCHEMA_VERSION = 20
+CURRENT_SCHEMA_VERSION = 21
 
 
 class MigrationStep(NamedTuple):
@@ -507,6 +507,28 @@ CREATE INDEX IF NOT EXISTS idx_question_auto_curation_audits_question
 
 CREATE INDEX IF NOT EXISTS idx_question_auto_curation_audits_decision
     ON question_auto_curation_audits(decision, created_at, id);
+""",
+    ),
+    MigrationStep(
+        "021_learning_dialog_context_summary_tables",
+        """
+CREATE TABLE IF NOT EXISTS learning_dialog_context_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    dialog_session_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    covered_message_id INTEGER REFERENCES learning_dialog_messages(id) ON DELETE SET NULL,
+    covered_message_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (topic_id, dialog_session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_dialog_context_summaries_session
+    ON learning_dialog_context_summaries(dialog_session_id, topic_id);
+
+CREATE INDEX IF NOT EXISTS idx_learning_dialog_context_summaries_updated
+    ON learning_dialog_context_summaries(updated_at, id);
 """,
     ),
 )

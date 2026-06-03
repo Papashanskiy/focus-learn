@@ -23,6 +23,7 @@ from interview_prep.services.question_quality_rules import (
     generated_question_quality_flags,
     generated_question_source_quality_status,
 )
+from interview_prep.services.question_source_service import QuestionSourceService
 from interview_prep.services.question_service import QuestionService
 
 
@@ -31,12 +32,14 @@ JOB_KIND_LEARNING_MATERIAL = "learning-material"
 JOB_KIND_SYSTEM_DESIGN_SCENARIO = "system-design-scenario"
 JOB_KIND_REFERENCE_ANSWER = "reference-answer"
 JOB_KIND_CURRICULUM = "curriculum"
+JOB_KIND_SOURCE_REFRESH = "source-refresh"
 JOB_KINDS = {
     JOB_KIND_QUESTION,
     JOB_KIND_LEARNING_MATERIAL,
     JOB_KIND_SYSTEM_DESIGN_SCENARIO,
     JOB_KIND_REFERENCE_ANSWER,
     JOB_KIND_CURRICULUM,
+    JOB_KIND_SOURCE_REFRESH,
 }
 JOB_STATUSES = {"queued", "running", "done", "failed"}
 ACTIVE_JOB_STATUSES = {"queued", "running"}
@@ -117,11 +120,21 @@ class ContentGenerationService:
             json.dumps(payload, ensure_ascii=False),
         )
 
+    def enqueue_source_refresh(self, note: str = "") -> ContentGenerationJob:
+        self._ensure_active_job_limit(JOB_KIND_SOURCE_REFRESH, 0)
+        payload = build_source_refresh_job_payload(note)
+        return self.repository.create_content_generation_job(
+            JOB_KIND_SOURCE_REFRESH,
+            json.dumps(payload, ensure_ascii=False),
+        )
+
     def enqueue(self, kind: str, topic_id: int, note: str = "") -> ContentGenerationJob:
         if kind not in JOB_KINDS:
             raise ValueError(f"Unknown generation job kind: {kind}")
         if kind == JOB_KIND_CURRICULUM:
             return self.enqueue_curriculum(note)
+        if kind == JOB_KIND_SOURCE_REFRESH:
+            return self.enqueue_source_refresh(note)
         topic = self.repository.get_topic(topic_id)
         if topic is None:
             raise ValueError(f"Unknown topic id: {topic_id}")
@@ -224,7 +237,7 @@ class ContentGenerationService:
             raise ValueError(f"Unknown job id: {job_id}")
         payload = parse_payload(job.payload_json)
         topic_id = int(payload.get("topic_id") or 0)
-        if job.kind == JOB_KIND_CURRICULUM:
+        if job.kind in {JOB_KIND_CURRICULUM, JOB_KIND_SOURCE_REFRESH}:
             self._ensure_active_job_limit(job.kind, 0, ignored_job_id=job_id)
         elif job.kind in JOB_KINDS and topic_id:
             self._ensure_active_job_limit(job.kind, topic_id, ignored_job_id=job_id)
@@ -282,6 +295,9 @@ class ContentGenerationService:
             elif job.kind == JOB_KIND_CURRICULUM:
                 question = None
                 artifact = self._process_curriculum_job(job)
+            elif job.kind == JOB_KIND_SOURCE_REFRESH:
+                question = None
+                artifact = self._process_source_refresh_job(job)
             else:
                 raise ValueError(f"Unsupported generation job kind: {job.kind}")
             self.repository.update_content_generation_job(
@@ -561,6 +577,19 @@ class ContentGenerationService:
             "topic_slugs": [topic.slug for topic in result.curriculum.topics],
         }
 
+    def _process_source_refresh_job(self, job: ContentGenerationJob) -> dict[str, Any]:
+        payload = parse_payload(job.payload_json)
+        note = str(payload.get("note") or "").strip()
+        result = QuestionSourceService(self.repository).refresh(dry_run=False)
+        return {
+            "kind": JOB_KIND_SOURCE_REFRESH,
+            "topic_id": 0,
+            "saved_count": result.saved_count,
+            "source_count": len(result.snapshots),
+            "source_ids": [snapshot.source_id for snapshot in result.snapshots],
+            "note": note,
+        }
+
 
 def parse_payload(payload_json: str) -> dict[str, Any]:
     try:
@@ -584,6 +613,14 @@ def build_curriculum_job_payload(note: str, topic_count: int, questions_per_topi
         "note": note.strip(),
         "topic_count": normalize_job_count(topic_count, default=3, minimum=1, maximum=12),
         "questions_per_topic": normalize_job_count(questions_per_topic, default=3, minimum=1, maximum=10),
+        "retry": normalize_retry_metadata(None),
+    }
+
+
+def build_source_refresh_job_payload(note: str) -> dict[str, Any]:
+    return {
+        "topic_id": 0,
+        "note": note.strip(),
         "retry": normalize_retry_metadata(None),
     }
 

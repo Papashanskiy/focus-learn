@@ -7,7 +7,7 @@ from interview_prep.infra.llm import OllamaClient, ResilientLLMClient
 from interview_prep.infra.repositories import SQLiteRepository
 from interview_prep.services.content_demand_service import ContentDemandService
 from interview_prep.services.content_generation_service import ContentGenerationService
-from interview_prep.services.content_scheduler_service import ContentSchedulerService
+from interview_prep.services.content_scheduler_service import ContentSchedulerPolicy, ContentSchedulerService
 from interview_prep.services.calibration_service import CalibrationService
 from interview_prep.services.curriculum_service import CurriculumService
 from interview_prep.services.evaluation_service import EvaluationService
@@ -57,7 +57,14 @@ class AppServices:
         self.stats = StatsService(self.repository)
         self.readiness = ReadinessService(self.repository)
         self.content_demand = ContentDemandService(self.repository, readiness=self.readiness)
-        self.content_scheduler = ContentSchedulerService(self.content_demand, self.content_generation)
+        self.content_scheduler = ContentSchedulerService(
+            self.content_demand,
+            self.content_generation,
+            ContentSchedulerPolicy(
+                local_llm_available=self._local_llm_runtime_available,
+                source_refresh_enabled=True,
+            ),
+        )
         self.interview_report = InterviewReportService(self.repository, self.readiness)
         self.read = ReadOnlyApplicationFacade(
             questions=self.questions,
@@ -69,6 +76,9 @@ class AppServices:
             repository=self.repository,
             readiness=self.readiness,
         )
+
+    def _local_llm_runtime_available(self) -> bool:
+        return getattr(self.llm, "last_error", None) is None
 
     def close(self) -> None:
         if getattr(self, "_closed", True):

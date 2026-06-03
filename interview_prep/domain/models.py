@@ -292,6 +292,18 @@ class LearningDialogMessage:
 
 
 @dataclass(frozen=True)
+class LearningDialogContextSummary:
+    id: int | None
+    topic_id: int
+    dialog_session_id: str
+    summary: str
+    covered_message_id: int | None
+    covered_message_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class LearningDialogSummary:
     topic_id: int
     topic_title: str

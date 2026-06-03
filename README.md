@@ -22,6 +22,7 @@
 - Fallback LLM на русском, если Ollama недоступна или не отвечает вовремя.
 - Добавление своих вопросов из свободного текста через LLM-структурирование.
 - TUI-режим System Design Mock Interview с ИИ-интервьюером и итоговым feedback.
+- TUI-режим `/learn` сохраняет учебный диалог и передает локальной модели bounded recent context плюс compact summary длинных диалогов.
 - Markdown в AI feedback, учебных ответах, system design replies и preview generated artifacts отображается через Rich Markdown renderer.
 - Генерация расширенного starter pack тем, subtopics, learning objectives и вопросов через локальную LLM командой `generate-seed`.
 - Автоматическая фоновая генерация дополнительных вопросов из TUI, когда по выбранной теме мало контента.
@@ -345,6 +346,8 @@ AI feedback в приложении — это учебная подсказка
 `/questions-review` открывает focused TUI-экран pending generated questions. На нем можно принять полезный вопрос командой `/questions-review accept <id>` или архивировать слабый через `/questions-review archive <id>` без удаления строки из SQLite.
 
 `/learn` включает учебный режим: обычный текст начинает диалог с ИИ по текущей теме или вопросу. Этот диалог не сохраняется как interview answer. При входе в режим приложение показывает последние сохраненные учебные реплики и последний учебный материал по теме или автоматически ставит фоновую задачу на генерацию материала; когда материал готов, он появляется в центральной области. Для длинного диалога доступны `/learn-older` и `/learn-newer`. `/practice` возвращает к прохождению вопросов.
+
+Follow-up вопросы в `/learn` не начинаются с чистого листа: перед запросом к локальной модели сервис добавляет bounded recent context текущего learning dialog session/topic, текущую тему, текущий interview question и новый user message. Recent context ограничен по числу реплик и символов, а длинные topic-bound диалоги дополнительно получают compact summary старой части разговора перед свежими turns. Topicless `/learn` остается изолированным и не подмешивает историю других тем или сессий.
 
 `/notebook` открывает read-only тетрадь сохраненных AI explanations из learning mode, feedback gaps из `/note-from-answer` и named manual notes из `/save-note`. Доступны фильтры `/notebook topic <id>`, `/notebook subtopic <id>`, `/notebook competency <slug>`, `/notebook all` и просмотр одной AI-записи через `/notebook entry <id>`.
 

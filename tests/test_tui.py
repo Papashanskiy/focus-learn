@@ -3317,6 +3317,44 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
             finally:
                 app.services.close()
 
+    def test_tui_idle_scheduler_refills_after_worker_pass(self) -> None:
+        class FakeIdleScheduler:
+            def __init__(self, jobs):
+                self.jobs = jobs
+                self.calls = 0
+
+            def run_once(self, **kwargs):
+                self.calls += 1
+                return SimpleNamespace(enqueued_jobs=self.jobs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = InterviewPrepTUI(
+                str(Path(tmp) / "tui_idle_scheduler_refill.db"),
+                auto_start_scheduler=True,
+            )
+            scheduler = FakeIdleScheduler((SimpleNamespace(id=93, kind="learning-material"),))
+            started: list[str] = []
+            app.services.content_scheduler = scheduler
+            app.render_all = lambda: None
+            app.start_background_content_worker = lambda: started.append("started")
+            try:
+                result = SimpleNamespace(
+                    job=SimpleNamespace(id=12, status="done"),
+                    created_question=SimpleNamespace(id=77),
+                    artifact={"kind": "question"},
+                )
+
+                app.finish_background_content_worker([result], None)
+
+                self.assertEqual(scheduler.calls, 1)
+                self.assertEqual(started, ["started"])
+                self.assertEqual(app.content_status, "scheduler queued 1 job(s)")
+                self.assertIn("Автогенерация добавила вопрос #77", app.history_text())
+                self.assertIn("Idle content scheduler поставил jobs", app.history_text())
+                self.assertIn("learning-material #93", app.history_text())
+            finally:
+                app.services.close()
+
     async def test_tui_auto_queues_learning_material_when_entering_learning_mode(self) -> None:
         class FakeContentGeneration:
             def __init__(self):
@@ -3903,7 +3941,15 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.last_message = ""
 
-            def explain(self, user_message, topic=None, question=None):
+            def explain(
+                self,
+                user_message,
+                topic=None,
+                question=None,
+                dialog_session_id=None,
+                recent_messages=None,
+                context_summary=None,
+            ):
                 self.last_message = user_message
                 return f"Разбор сохраненного вопроса:\n{user_message}"
 
@@ -4556,7 +4602,15 @@ class TUITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tui_learning_mode_does_not_save_interview_answer(self) -> None:
         class FakeLearning:
-            def explain(self, user_message, topic=None, question=None):
+            def explain(
+                self,
+                user_message,
+                topic=None,
+                question=None,
+                dialog_session_id=None,
+                recent_messages=None,
+                context_summary=None,
+            ):
                 return f"Учебный ответ: {user_message}"
 
         with tempfile.TemporaryDirectory() as tmp:

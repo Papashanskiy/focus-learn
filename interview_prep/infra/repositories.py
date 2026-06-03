@@ -14,6 +14,7 @@ from interview_prep.domain.models import (
     CurriculumObjective,
     CurriculumSubtopic,
     CurriculumTopic,
+    LearningDialogContextSummary,
     LearningDialogMessage,
     LearningDialogSummary,
     LearningMaterial,
@@ -429,6 +430,19 @@ def _learning_dialog_message(row: sqlite3.Row) -> LearningDialogMessage:
         dialog_session_id=row["dialog_session_id"] if "dialog_session_id" in keys else None,
         context_type=row["context_type"] if "context_type" in keys else None,
         context_id=row["context_id"] if "context_id" in keys else None,
+    )
+
+
+def _learning_dialog_context_summary(row: sqlite3.Row) -> LearningDialogContextSummary:
+    return LearningDialogContextSummary(
+        id=row["id"],
+        topic_id=row["topic_id"],
+        dialog_session_id=row["dialog_session_id"],
+        summary=row["summary"],
+        covered_message_id=row["covered_message_id"],
+        covered_message_count=row["covered_message_count"],
+        created_at=_dt(row["created_at"]),
+        updated_at=_dt(row["updated_at"]),
     )
 
 
@@ -2790,6 +2804,73 @@ class SQLiteRepository:
             (dialog_session_id,),
         ).fetchall()
         return [_learning_dialog_message(row) for row in rows]
+
+    def upsert_learning_dialog_context_summary(
+        self,
+        summary: LearningDialogContextSummary,
+    ) -> LearningDialogContextSummary:
+        created_at = summary.created_at.isoformat(timespec="seconds")
+        updated_at = summary.updated_at.isoformat(timespec="seconds")
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO learning_dialog_context_summaries
+                    (
+                        topic_id,
+                        dialog_session_id,
+                        summary,
+                        covered_message_id,
+                        covered_message_count,
+                        created_at,
+                        updated_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(topic_id, dialog_session_id) DO UPDATE SET
+                    summary = excluded.summary,
+                    covered_message_id = excluded.covered_message_id,
+                    covered_message_count = excluded.covered_message_count,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    summary.topic_id,
+                    summary.dialog_session_id,
+                    summary.summary,
+                    summary.covered_message_id,
+                    summary.covered_message_count,
+                    created_at,
+                    updated_at,
+                ),
+            )
+        stored = self.get_learning_dialog_context_summary(
+            summary.dialog_session_id,
+            summary.topic_id,
+        )
+        if stored is None:
+            raise RuntimeError("Learning dialog context summary was not persisted")
+        return stored
+
+    def get_learning_dialog_context_summary(
+        self,
+        dialog_session_id: str,
+        topic_id: int,
+    ) -> LearningDialogContextSummary | None:
+        row = self.connection.execute(
+            """
+            SELECT
+                id,
+                topic_id,
+                dialog_session_id,
+                summary,
+                covered_message_id,
+                covered_message_count,
+                created_at,
+                updated_at
+            FROM learning_dialog_context_summaries
+            WHERE dialog_session_id = ? AND topic_id = ?
+            """,
+            (dialog_session_id, topic_id),
+        ).fetchone()
+        return _learning_dialog_context_summary(row) if row else None
 
     def list_learning_dialog_summaries(self, limit: int = 30) -> list[LearningDialogSummary]:
         rows = self.connection.execute(

@@ -13,7 +13,7 @@
 - Фоновая генерация контента происходит неравномерно и может простаивать; приложению нужен always-on scheduler, который сам держит запас вопросов/материалов/scenarios по gaps и refresh policy.
 - После code review в backlog добавлены системные follow-ups: `CURRENT_SCHEMA_VERSION` теперь закреплен regression-тестом против последнего migration step, content generation retry/backoff приведен к automatic requeue контракту, а пустая legacy CLI practice session теперь завершается как `abandoned`.
 - Фоновая генерация контента уже умеет генерировать вопросы, учебные материалы и system design scenarios; TUI автоматически ставит эти задачи, показывает компактный статус очереди/последний результат в верхней строке, имеет экран `/materials` для просмотра/выбора generated artifacts и экран `/content` для списка queued/running/failed jobs, scheduled retry и безопасного manual retry failed job. Полноценное управление очередью из TUI еще не готово.
-- Для будущего always-on scheduler добавлен read-only content demand model и первый TUI startup hook: service-level snapshot считает target/current/deficit для accepted/candidate questions, learning materials и system design scenarios по topic/upcoming modes/top readiness gaps, planner pass при запуске TUI может поставить новые jobs и запустить worker, но idle loop, cooldown/attempt guards и model availability guard еще открыты.
+- Для будущего always-on scheduler добавлен read-only content demand model, первый TUI startup hook, idle refill loop, cooldown/attempt guards и model availability guard: service-level snapshot считает target/current/deficit для accepted/candidate questions, learning materials и system design scenarios по topic/upcoming modes/top readiness gaps, planner pass при запуске TUI и после завершения worker-pass может поставить новые jobs и запустить worker.
 - TUI layout уже движется к focused/mode-aware интерфейсу; default minimal mode описан в документации: стартовый экран показывает Today action и mode menu, practice/learning/system design держат текущую работу в центральной области, а service/debug surfaces уходят в Advanced/power-user flow.
 - Читаемость AI-диалогов в TUI уже улучшена единым renderer в learning, system design и daily practice review, но markdown из LLM пока часто отображается как сырой текст.
 - TUI теперь прогоняет LLM-authored markdown через Rich Markdown renderer для AI feedback, learning answers, system design replies и preview generated artifacts; нужны более широкие regression-тесты на markdown в чат-окнах.
@@ -22,6 +22,7 @@
 - Для вопросов добавлен foundation тегов: domain-модель `Tag`, SQLite-таблицы `tags`/`question_tags`, repository-методы для привязки тегов к вопросам, CLI `questions` показывает привязанные теги вопроса и фильтрует список через `--tag <slug>`, а TUI показывает теги текущего вопроса в practice workflow. Canonical `canonical-2026` seed questions теперь получают metadata tags `must-know`, `frequency-high` и top-level type tags (`coding`, `api`, `db`, `system-design` и др.) без новой схемы.
 - Для накопительной тетради AI-объяснений добавлен storage foundation: domain-модель `NotebookEntry`, SQLite-таблица `notebook_entries` и repository-методы чтения по topic/subtopic/session/source message.
 - Learning mode теперь автоматически сохраняет AI-объяснения в notebook entries с привязкой к topic/dialog session/source message. TUI получил read-only экран `/notebook` с фильтрами topic/subtopic/competency, named manual notes, feedback gaps из `/note-from-answer` и просмотром сохраненных explanations; переходы в notebook уже заметны из стартового/topic экрана, history learning dialogs и `/materials`.
+- User feedback 2026-06-03: learning mode показывает и сохраняет dialog transcript, а LLM prompt уже получает persisted compact summary старой части текущего learning dialog плюс последние реплики текущей session/topic как recent context с message/character budget guard; regression-тесты и документация покрывают sequential follow-ups, topic/session isolation и summary behavior.
 - Для ручных заметок добавлен storage foundation: domain-модель `ManualNote`, SQLite-таблица `manual_notes` и repository-методы чтения по topic/session/context; TUI notes editor сохраняет и восстанавливает draft по session/topic/global context.
 - Ручная UX-регрессия `learn` до выбора topic закрыта: вход запускает новую topicless learning-сессию без восстановления прошлых topic-bound реплик; вход в конспект обучения уже заметен на стартовом/topic экране через Notebook action и подсказку, из history learning dialogs и из `/materials` по текущей или выбранной теме.
 - Переключение TUI между `learn`/`system-design`/`practice` через клики и slash-команды больше не наслаивает focused modes: текущий focused mode разворачивается до practice-context перед входом в другой основной режим.
@@ -37,7 +38,7 @@
 - CLI `interview-report` экспортирует Markdown-отчет перед интервью по latest или выбранной completed practice session: readiness signal, strengths/gaps, evidence answers и next plan.
 - CLI `curriculum-status` показывает read-only покрытие generated curriculum: counts curriculum topics/subtopics/objectives/questions и пустые зоны bootstrap/fallback.
 - Generated content уже появляется в приложении; для generated questions добавлен первый quality gate против очевидных дублей внутри темы и шаблонных generic prompts, storage foundation source_quality/status (`pending_review`/`accepted`/`archived`), CLI `questions-review` и TUI `/questions-review` как audit queue для pending exceptions, где automated curation является happy path, а accept/archive подписаны как manual audit overrides. Questions-review теперь показывает latest auto-curation audit context для вопросов с сохраненным audit row: rationale, source evidence и safe undo hint. Background question generation уже просит LLM вернуть tag/competency slugs и безопасно привязывает tags/known competencies к новым вопросам; generated materials/scenarios можно архивировать с optional reason; еще нет оценки полезности generated artifacts.
-- Source refresh pipeline уже может превращать whitelisted source snapshots в собственные `source-backed` candidate questions со статусом `pending_auto_review`, source URL/retrieved metadata, category hints и frequency hint; deterministic/LLM auto-curation может принять high-confidence candidates в practice или архивировать generic/duplicate, non-dry-run decisions сохраняются в audit storage, CLI `questions-source audit` и TUI `/curation-audit` read-only показывают saved decisions. CLI `questions-source undo` безопасно откатывает последний matching decision, если текущий статус вопроса все еще совпадает с audited resulting status.
+- Source refresh pipeline уже может превращать whitelisted source snapshots в собственные `source-backed` candidate questions со статусом `pending_auto_review`, source URL/retrieved metadata, category hints и frequency hint; deterministic/LLM auto-curation может принять high-confidence candidates в practice или архивировать generic/duplicate, non-dry-run decisions сохраняются в audit storage, CLI `questions-source audit` и TUI `/curation-audit` read-only показывают saved decisions. CLI `questions-source undo` безопасно откатывает последний matching decision, если текущий статус вопроса все еще совпадает с audited resulting status. TUI scheduler теперь ставит metadata-only `source-refresh` job, если whitelisted snapshots отсутствуют или старше cadence policy.
 - TUI refactor уже выделил pure render helpers, practice/learning/system-design controllers и content worker orchestration; дальнейшие TUI-фичи должны сохранять этот контракт и не возвращать state transitions обратно в монолитный `ui/tui.py`.
 
 ## Product principles
@@ -48,6 +49,7 @@
 - Content curation должна быть automated-by-default: LLM и deterministic quality gates принимают рутинные решения, а пользователь видит только понятный аудит, undo и редкие quarantine cases.
 - Основной TUI должен быть минималистичным: стартовое menu выбирает режим, focused screen показывает одно учебное действие, а служебные экраны доступны как advanced/debug, не как основной рабочий поток.
 - TUI должен фокусировать экран на текущем учебном действии. Если пользователь в режиме обучения, основное пространство должно быть занято объяснением и диалогом, а не простаивающими панелями.
+- Learning mode должен поддерживать conversational continuity: уточняющие вопросы пользователя должны получать контекст хотя бы нескольких последних реплик, а при длинном диалоге - компактную сводку вместо молчаливого сброса разговора.
 - Senior readiness должен измеряться по наблюдаемым компетенциям и evidence, а не по общему ощущению прогресса. Любая рекомендация следующего шага должна объяснять, какой gap она закрывает.
 
 ## Roadmap execution rules
@@ -62,6 +64,18 @@
 
 ## Done
 
+- [x] Canonical/source coverage priority: scheduler priority tiers now treat `source-refresh` source-curation coverage targets as question-coverage work ahead of learning/system-design artifact refresh, with regression coverage for tight scheduler budgets.
+- [x] Weak competency topic mapping: readiness-gap competency targets now reuse existing question-to-topic links so the scheduler can enqueue question-generation jobs for mapped weak competencies.
+- [x] Queue prioritization scheduler tiers: bounded scheduler passes now prioritize question-generation targets before learning/system-design artifact targets, independent of raw demand snapshot order.
+- [x] Scheduler idle generation loop: after a TUI content worker pass finishes, minimal mode reruns the bounded scheduler planner and starts another worker pass only when new jobs are enqueued and the worker is not paused.
+- [x] Source refresh cadence: scheduler policy now detects missing/stale whitelisted source snapshots and queues a metadata-only `source-refresh` job through the existing content worker.
+- [x] Scheduler model availability guard: planner policy and AppServices runtime signal can skip enqueueable local-LLM generation deficits without spending job budget when generation is disabled or the model runtime is explicitly unavailable.
+- [x] Scheduler cooldown/attempt guards: planner now skips topic/kind targets with active retry backoff, recent completed jobs or recent failed jobs so deficits do not immediately spawn repeat local LLM work.
+- [x] Learning context docs sync: README, CLAUDE and roadmap notes now describe bounded recent learning context, topic/session isolation and compact summary behavior for local-model follow-ups.
+- [x] Learning context regression tests: service-level coverage now verifies two sequential follow-up prompts, topicless learning prompts without persisted topic leakage, and topic/session isolation for recent context.
+- [x] Learning summary foundation: long topic-bound learning dialogs now persist one compact rolling context summary per dialog session/topic and include it in LLM prompts before fresh recent turns.
+- [x] Learning context budget guard: recent learning dialog context is capped by message count and character budget, trims oversized turns, and keeps topic/question/current user message outside the recent-context cap.
+- [x] Learning context prompt: `LearningService` now includes recent user/assistant turns from the current learning dialog session/topic in the LLM prompt, while TUI prepares that context before the background LLM thread.
 - [x] Scheduler TUI startup hook: real TUI startup now runs one scheduler planner pass and starts the existing content worker only when that pass enqueues new jobs and the worker is not paused.
 - [x] Scheduler planner foundation: service-level bounded `run_once()` now turns topic-level demand deficits into queued question/material/system-design jobs without starting the worker or changing TUI flow.
 - [x] Always-on content demand model: service-level snapshot now reports target/current/deficit counts for topic practice stock, candidate questions, learning materials, system design scenarios and top readiness-gap competencies without enqueueing jobs.
@@ -410,17 +424,28 @@
   - [x] Key flow navigation regression: проверить возврат между menu/workflow surfaces без наложения panes в ключевых flows.
 - [x] Docs: при изменении TUI default mode обновить `README.md`, `DEVELOPMENT_LOG.md` и roadmap notes с описанием minimal/advanced modes.
 
-### 0D. Always-on content generation and refresh
+### 0D. User feedback: learning context continuity
+
+- [x] Learning context prompt: передавать в `LearningService` bounded recent dialog history текущей learning session/topic и включать последние несколько user/assistant реплик в LLM prompt, чтобы follow-up вопросы не начинались с чистого листа.
+- [x] Learning context budget guard: ограничить размер prompt context по числу реплик/символов и всегда сохранять самые свежие turns, текущую тему, текущий interview question и новый user message.
+- [x] Learning summary foundation: добавить rolling summary/compaction для длинных learning dialogs, чтобы при переполнении context window LLM получала краткую сводку старой части разговора плюс свежие turns.
+- [x] Learning context regression tests: покрыть два последовательных follow-up вопроса, topicless/topic-bound sessions и отсутствие утечки истории между темами/сессиями.
+- [x] Docs: после реализации обновить `README.md`, `CLAUDE.md`, `DEVELOPMENT_LOG.md` и roadmap notes с описанием bounded context и summary behavior для локальной модели.
+
+### 0E. Always-on content generation and refresh
 
 - [x] Content demand model: определить минимальные запасы accepted/candidate questions, learning materials и system design scenarios по competency/topic, readiness gaps и upcoming modes.
-- [ ] Background scheduler: добавить always-on planner, который при запуске TUI сам ставит jobs до target запасов, учитывает cooldowns, model availability, attempts и не требует ручного `/generate-*`.
+- [x] Background scheduler: добавить always-on planner, который при запуске TUI сам ставит jobs до target запасов, учитывает cooldowns, model availability, attempts и не требует ручного `/generate-*`.
   - [x] Scheduler planner foundation: добавить service-level bounded `run_once()`, который по `ContentDemandSnapshot` ставит topic-level `question`/`learning-material`/`system-design-scenario` jobs без запуска worker и без TUI hook.
   - [x] Scheduler TUI startup hook: при старте TUI запускать planner pass и worker только если есть новые queued jobs и worker не на паузе.
-  - [ ] Scheduler cooldown/attempt guards: учитывать recent done/failed jobs и retry metadata, чтобы planner не ставил повторные jobs слишком часто.
-  - [ ] Scheduler model availability guard: не тратить job budget на local LLM work, если runtime явно недоступен или отключен policy.
-- [ ] Idle generation loop: продолжать генерацию, пока есть deficits и budget, даже если пользователь находится в practice/learn/menu; показывать только компактный статус в minimal mode.
-- [ ] Source refresh cadence: добавить staleness policy для source snapshots и automatic reminder/job, когда sources старше заданного периода.
-- [ ] Queue prioritization: сначала генерировать/курировать вопросы для weak competencies и canonical coverage gaps, затем materials/reference answers/scenarios.
+  - [x] Scheduler cooldown/attempt guards: учитывать recent done/failed jobs и retry metadata, чтобы planner не ставил повторные jobs слишком часто.
+  - [x] Scheduler model availability guard: не тратить job budget на local LLM work, если runtime явно недоступен или отключен policy.
+- [x] Idle generation loop: продолжать генерацию, пока есть deficits и budget, даже если пользователь находится в practice/learn/menu; показывать только компактный статус в minimal mode.
+- [x] Source refresh cadence: добавить staleness policy для source snapshots и automatic reminder/job, когда sources старше заданного периода.
+- [x] Queue prioritization: сначала генерировать/курировать вопросы для weak competencies и canonical coverage gaps, затем materials/reference answers/scenarios.
+  - [x] Scheduler priority tiers: bounded planner pass considers question-generation targets before learning materials and system design scenarios, even if the raw demand snapshot is ordered differently.
+  - [x] Weak competency topic mapping: enqueue question-generation jobs for readiness-gap competency targets when the gap can be mapped to an existing topic.
+  - [x] Canonical/source coverage priority: prioritize canonical coverage/source-curation question gaps ahead of artifact refresh work when both fit the scheduler budget.
 - [ ] Safety controls: добавить config limits для daily job budget, max concurrent local LLM calls, pause/resume и network/source refresh enablement.
 - [ ] Tests: покрыть scheduler decisions, no-idle refill, retry interaction и budget limits unit/regression-тестами без реальных LLM/network calls.
 - [ ] Docs: после always-on scheduler обновить `README.md`, `DEVELOPMENT_LOG.md` и troubleshooting по pause/resume, budgets и source refresh.
@@ -714,7 +739,7 @@
 ## Known limitations
 
 - Notes editor в TUI сохраняет draft в `manual_notes` и восстанавливает его при возврате в session/topic/global context; именованные manual notes сохраняются через `/save-note` и видны в `/notebook`, но отдельного edit/delete flow для них пока нет.
-- Learning dialog persistence сохраняет и восстанавливает последние реплики по теме; focused learning layout умеет листать длинный загруженный диалог компактными командами.
+- Learning dialog persistence сохраняет и восстанавливает последние реплики по теме; focused learning layout умеет листать длинный загруженный диалог компактными командами. LLM prompt уже получает persisted compact summary старой части topic-bound dialog и bounded recent history с лимитом по репликам/символам; regression-тесты и документация закрывают sequential follow-ups, topic/session isolation и summary behavior для локальной модели.
 - Уже пройденные practice sessions видны в read-only `/history` с деталями ответов; session outcomes уже имеют SQLite/repository storage foundation, создаются автоматически для completed sessions с ответами и показываются на TUI ended screen и через `/finish-session`, но пока не показываются в history/CLI.
 - AI-объяснения из learning mode и named manual notes уже доступны через `/notebook`; topic/subtopic/competency filters подключены, но edit/delete flow для named manual notes пока нет.
 - System Design Mock Interview сохраняет transcript, design artifact sections, промежуточные `/sd-checkpoint` и `/sd-pressure` как interviewer transcript messages, итоговый feedback artifact, seeded system design rubric dimensions и structured rubric evaluation после `/sd-feedback`; TUI history показывает final feedback и rubric scores через `/history system-design`, а CLI `system-design-history` показывает saved scenarios, transcript, artifacts, feedback и rubric scores.
@@ -724,7 +749,7 @@
 - TUI `/materials` уже показывает generated artifacts, версии artifacts внутри темы, latest/конкретный выбор, preview полного artifact без входа в другой режим, выбрать сохраненный material/scenario, фильтровать learning materials и system design scenarios по текущему контексту или всем темам, а также архивировать неудачные learning materials и system design scenarios через `/archive-material <id> confirm [reason]` и `/archive-scenario <id> confirm [reason]`.
 - TUI `/content` уже показывает список queued/running/failed generation jobs, `/generate-curriculum` ставит background curriculum job, TUI worker можно ставить на паузу через `/pause-content`, возобновлять через `/resume-content`, видеть scheduled retry для transient failures и безопасно возвращать failed job в queued через `/retry-job <id>`. Scheduler пока не держит постоянный запас контента без ручных команд. CLI `content-enqueue --kind reference-answer` ставит регенерацию эталонных ответов существующих вопросов темы.
 - TUI использует многострочный composer вместо однострочного input bar; Enter отправляет сообщение, Shift+Enter вставляет newline, а длинный draft расширяет composer до capped scrollable области.
-- TUI default surface уже получил documented minimal start layout и `Advanced` branch для служебных/audit surfaces; start-screen hints, queue controls grouping и focused screens для practice/learn/system design закрыты, а следующий UX фокус переходит к always-on content generation.
+- TUI default surface уже получил documented minimal start layout и `Advanced` branch для служебных/audit surfaces; start-screen hints, queue controls grouping и focused screens для practice/learn/system design закрыты. Текущий user-feedback приоритет - learning context continuity; после него фокус возвращается к always-on content generation.
 - Теги вопросов уже хранятся в SQLite и отображаются в CLI `questions` и TUI practice workflow; CLI `questions --tag <slug>` фильтрует список вопросов по тегу.
 - AI feedback зависит от доступности локальной Ollama; при недоступности после timeout возвращается fallback checklist.
 - Readiness dashboard и competency coverage уже есть, но их качество зависит от curated question coverage, canonical must-know questions и достаточного evidence по каждой competency.

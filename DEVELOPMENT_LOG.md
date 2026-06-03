@@ -1,5 +1,85 @@
 # Development Log
 
+## 2026-06-03
+
+### Canonical/source coverage priority
+
+- Закрыт roadmap leaf `Canonical/source coverage priority`: reusable scheduler priority tiers теперь ставят `source-refresh`/source-curation coverage targets после question-generation targets, но до learning-material/system-design artifact refresh work.
+- Добавлен regression-тест с misordered demand snapshot и tight budget: scheduler ставит `question` и `source-refresh` jobs, а learning/scenario artifacts получают `scheduler budget exhausted`.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_content_scheduler_enqueues_topic_deficit_jobs_without_processing tests.test_services.ServiceTests.test_content_scheduler_maps_readiness_gap_competency_to_topic_question_job tests.test_services.ServiceTests.test_content_scheduler_prioritizes_question_jobs_before_artifacts tests.test_services.ServiceTests.test_content_scheduler_prioritizes_source_coverage_before_artifacts tests.test_services.ServiceTests.test_content_scheduler_skips_active_jobs_and_respects_run_budget tests.test_services.ServiceTests.test_content_scheduler_skips_recent_done_and_failed_jobs_until_cooldown tests.test_services.ServiceTests.test_content_scheduler_skips_queued_retry_backoff_job tests.test_services.ServiceTests.test_content_scheduler_skips_llm_jobs_when_model_unavailable_or_disabled tests.test_services.ServiceTests.test_content_scheduler_enqueues_source_refresh_when_snapshots_are_stale tests.test_services.ServiceTests.test_content_scheduler_skips_source_refresh_when_snapshots_are_fresh -v`, `python -m compileall interview_prep`.
+
+### Weak competency topic mapping
+
+- Закрыт roadmap leaf `Weak competency topic mapping`: readiness-gap competency targets теперь получают existing topic mapping через `question_competencies`, если у competency уже есть связанные вопросы в теме.
+- Scheduler использует этот mapping без нового job kind/schema: candidate-question deficit по weak competency ставит обычный `question` job для найденной темы, а unmapped competency gaps остаются skipped как раньше.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_content_demand_model_reports_readiness_gap_competency_targets tests.test_services.ServiceTests.test_content_scheduler_enqueues_topic_deficit_jobs_without_processing tests.test_services.ServiceTests.test_content_scheduler_maps_readiness_gap_competency_to_topic_question_job tests.test_services.ServiceTests.test_content_scheduler_prioritizes_question_jobs_before_artifacts tests.test_services.ServiceTests.test_content_scheduler_skips_active_jobs_and_respects_run_budget tests.test_services.ServiceTests.test_content_scheduler_skips_recent_done_and_failed_jobs_until_cooldown tests.test_services.ServiceTests.test_content_scheduler_skips_queued_retry_backoff_job tests.test_services.ServiceTests.test_content_scheduler_skips_llm_jobs_when_model_unavailable_or_disabled -v`, `python -m compileall interview_prep`.
+
+### Queue prioritization scheduler tiers
+
+- Первый open roadmap item `Queue prioritization` был слишком крупным для одной итерации, поэтому он разбит в `## Next` на scheduler priority tiers, weak competency topic mapping и canonical/source coverage priority leaves.
+- Закрыт первый safe leaf: `ContentSchedulerService` теперь явно сортирует demand deficits перед budget checks, чтобы question-generation targets получали scheduler budget раньше learning-material/system-design artifact targets даже при неудачном порядке raw snapshot.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_content_scheduler_enqueues_topic_deficit_jobs_without_processing tests.test_services.ServiceTests.test_content_scheduler_prioritizes_question_jobs_before_artifacts tests.test_services.ServiceTests.test_content_scheduler_skips_active_jobs_and_respects_run_budget tests.test_services.ServiceTests.test_content_scheduler_skips_recent_done_and_failed_jobs_until_cooldown tests.test_services.ServiceTests.test_content_scheduler_skips_queued_retry_backoff_job tests.test_services.ServiceTests.test_content_scheduler_skips_llm_jobs_when_model_unavailable_or_disabled -v`, `python -m unittest tests.test_services.ServiceTests.test_content_scheduler_enqueues_source_refresh_when_snapshots_are_stale tests.test_services.ServiceTests.test_content_scheduler_skips_source_refresh_when_snapshots_are_fresh -v`, `python -m compileall interview_prep`.
+
+### Source refresh cadence
+
+- Закрыт roadmap leaf `Source refresh cadence`: `QuestionSourceService` теперь считает missing/stale whitelisted source snapshots по cadence policy, а TUI-level scheduler через `AppServices` ставит metadata-only `source-refresh` job, если snapshots отсутствуют или устарели.
+- Новый `source-refresh` job переиспользует существующий `questions-source refresh` service path и content worker, обновляет только `question_source_snapshots` и не создает practice questions/candidates.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_question_source_refresh_persists_metadata_without_creating_questions tests.test_services.ServiceTests.test_question_source_staleness_report_detects_missing_and_stale_snapshots tests.test_services.ServiceTests.test_content_generation_source_refresh_job_persists_snapshots tests.test_services.ServiceTests.test_content_scheduler_enqueues_source_refresh_when_snapshots_are_stale tests.test_services.ServiceTests.test_content_scheduler_skips_source_refresh_when_snapshots_are_fresh -v`, `python -m unittest tests.test_services.ServiceTests.test_content_scheduler_enqueues_topic_deficit_jobs_without_processing tests.test_services.ServiceTests.test_content_scheduler_skips_active_jobs_and_respects_run_budget tests.test_services.ServiceTests.test_content_scheduler_skips_recent_done_and_failed_jobs_until_cooldown tests.test_services.ServiceTests.test_content_scheduler_skips_queued_retry_backoff_job tests.test_services.ServiceTests.test_content_scheduler_skips_llm_jobs_when_model_unavailable_or_disabled -v`, `python -m unittest tests.test_tui.TUIHelperTests.test_content_artifact_label_formats_curriculum_jobs -v`, `python -m compileall interview_prep`.
+
+### Scheduler idle generation loop
+
+- Закрыт roadmap leaf `Idle generation loop`: после завершения TUI content worker pass приложение снова запускает bounded scheduler planner и стартует следующий worker pass, если planner поставил новые jobs и worker не на паузе.
+- Поведение остается компактным для minimal mode: пользователь видит только существующий topbar/content status и history-событие, без открытия `/content` или новых service panes.
+- Проверки: `python -m unittest tests.test_tui.TUITests.test_tui_idle_scheduler_refills_after_worker_pass tests.test_tui.TUITests.test_tui_startup_scheduler_starts_worker_only_for_new_jobs -v`, `python -m compileall interview_prep`.
+
+### Scheduler model availability guard
+
+- Закрыт roadmap leaf `Scheduler model availability guard`: `ContentSchedulerPolicy` теперь умеет отключать local LLM generation целиком или получать testable availability check, а planner пропускает enqueueable deficits без расхода job budget, если runtime явно недоступен; `AppServices` передает в scheduler текущий known-unavailable сигнал из `ResilientLLMClient.last_error`.
+- Accepted-question deficits по-прежнему остаются в curation path, а availability guard применяется только к job kinds, которые реально ставят local LLM work в очередь.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_content_scheduler_enqueues_topic_deficit_jobs_without_processing tests.test_services.ServiceTests.test_content_scheduler_skips_active_jobs_and_respects_run_budget tests.test_services.ServiceTests.test_content_scheduler_skips_recent_done_and_failed_jobs_until_cooldown tests.test_services.ServiceTests.test_content_scheduler_skips_queued_retry_backoff_job tests.test_services.ServiceTests.test_content_scheduler_skips_llm_jobs_when_model_unavailable_or_disabled -v`, `python -m compileall interview_prep`.
+
+### Scheduler cooldown/attempt guards
+
+- Закрыт roadmap leaf `Scheduler cooldown/attempt guards`: `ContentSchedulerService` теперь пропускает target topic/kind, если уже есть active retry backoff job, недавний `done` job или недавний `failed` job в пределах policy cooldown.
+- Решение: cooldown хранится как service policy (`completed_job_cooldown_seconds`, `failed_job_cooldown_seconds`) и не меняет SQLite-схему, worker retry/backoff или TUI worker lifecycle.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_content_scheduler_enqueues_topic_deficit_jobs_without_processing tests.test_services.ServiceTests.test_content_scheduler_skips_active_jobs_and_respects_run_budget tests.test_services.ServiceTests.test_content_scheduler_skips_recent_done_and_failed_jobs_until_cooldown tests.test_services.ServiceTests.test_content_scheduler_skips_queued_retry_backoff_job -v`, `python -m compileall interview_prep`.
+
+### Learning context docs sync
+
+- Закрыт roadmap leaf `Docs` в блоке learning context continuity: README и CLAUDE больше не описывают bounded recent context как будущий gap, а фиксируют текущее поведение `/learn`.
+- Документация теперь явно описывает message/character budget guard, topic/session isolation, topicless `/learn` без leakage и compact summary старой части длинного topic-bound диалога перед свежими turns.
+- Проверки: `python -m compileall interview_prep`, `rg -n "bounded recent|compact summary|topicless|Learning context docs sync|summary behavior" README.md CLAUDE.md ROADMAP.md DEVELOPMENT_LOG.md`.
+
+### Learning context regression tests
+
+- Закрыт roadmap leaf `Learning context regression tests`: добавлены service-level regression-тесты для двух последовательных follow-up вопросов в одном learning dialog, topicless prompt без persisted topic leakage и topic/session isolation для recent context.
+- `LearningService.recent_dialog_context()` теперь не подмешивает persisted history, если prompt строится без выбранной topic/question context; topicless `/learn` остается чистым до выбора темы.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_learning_prompt_is_not_interview_evaluation tests.test_services.ServiceTests.test_learning_prompt_includes_recent_dialog_context tests.test_services.ServiceTests.test_learning_prompt_includes_summary_before_recent_dialog_context tests.test_services.ServiceTests.test_learning_prompt_limits_recent_context_budget_and_keeps_current_context tests.test_services.ServiceTests.test_learning_service_passes_recent_session_context_to_prompt tests.test_services.ServiceTests.test_learning_service_keeps_two_sequential_followups_in_same_dialog_context tests.test_services.ServiceTests.test_learning_service_separates_topicless_topic_and_session_contexts tests.test_services.ServiceTests.test_learning_service_compacts_older_dialog_messages_for_next_prompt tests.test_services.ServiceTests.test_learning_service_updates_compaction_summary_after_saved_exchange -v`, `python -m unittest tests.test_tui.TUITests.test_tui_learning_before_topic_selection_does_not_load_saved_topic_dialog -v`, `python -m compileall interview_prep`.
+
+### Learning summary foundation
+
+- Закрыт roadmap leaf `Learning summary foundation`: добавлена SQLite/domain/repository foundation `learning_dialog_context_summaries` для одного compact rolling summary на learning dialog session/topic.
+- `LearningService` включает `<learning_dialog_summary>` перед fresh `<recent_learning_dialog>` в prompt и обновляет summary после длинных saved learning exchanges; TUI заранее получает summary/recent turns до background LLM thread.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_current_schema_version_matches_latest_migration_step tests.test_services.ServiceTests.test_init_db_runs_explicit_idempotent_migration_steps tests.test_services.ServiceTests.test_init_db_creates_learning_dialog_context_summary_storage tests.test_services.ServiceTests.test_learning_prompt_is_not_interview_evaluation tests.test_services.ServiceTests.test_learning_prompt_includes_recent_dialog_context tests.test_services.ServiceTests.test_learning_prompt_includes_summary_before_recent_dialog_context tests.test_services.ServiceTests.test_learning_prompt_limits_recent_context_budget_and_keeps_current_context tests.test_services.ServiceTests.test_learning_service_passes_recent_session_context_to_prompt tests.test_services.ServiceTests.test_learning_service_compacts_older_dialog_messages_for_next_prompt tests.test_services.ServiceTests.test_learning_service_updates_compaction_summary_after_saved_exchange tests.test_services.ServiceTests.test_repository_upserts_learning_dialog_context_summary tests.test_services.ServiceTests.test_learning_service_saves_user_and_assistant_messages -v`, `python -m unittest tests.test_tui.TUITests.test_tui_learning_mode_does_not_save_interview_answer tests.test_tui.TUITests.test_tui_composer_submits_multiline_code_block_to_learning tests.test_tui.TUITests.test_tui_learning_mode_persists_dialog_through_service -v`, `python -m compileall interview_prep`, `python -m unittest tests.test_services.ServiceTests.test_init_db_upgrades_legacy_practice_database_to_current_schema -v`.
+
+### Learning context budget guard
+
+- Закрыт roadmap leaf `Learning context budget guard`: recent learning dialog context теперь ограничен по числу реплик и общему character budget, а oversized turns сокращаются до безопасного размера.
+- Текущая тема, текущий interview question и новый user message остаются отдельными prompt blocks вне recent-context cap, чтобы budget guard не вырезал главный запрос пользователя.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_learning_prompt_is_not_interview_evaluation tests.test_services.ServiceTests.test_learning_prompt_includes_recent_dialog_context tests.test_services.ServiceTests.test_learning_prompt_limits_recent_context_budget_and_keeps_current_context tests.test_services.ServiceTests.test_learning_service_passes_recent_session_context_to_prompt tests.test_services.ServiceTests.test_learning_service_saves_user_and_assistant_messages -v`.
+
+### Learning context prompt
+
+- Закрыт roadmap leaf `Learning context prompt`: `LearningService` добавляет в LLM prompt `<recent_learning_dialog>` с последними user/assistant репликами текущего `dialog_session_id` и текущей topic/question context, чтобы follow-up вопросы в `/learn` не стартовали с пустого разговора.
+- TUI получает recent context до background LLM thread и передает готовые messages в service prompt call, чтобы не читать SQLite connection из worker thread.
+- Проверки: `python -m unittest tests.test_services.ServiceTests.test_learning_prompt_is_not_interview_evaluation tests.test_services.ServiceTests.test_learning_prompt_includes_recent_dialog_context tests.test_services.ServiceTests.test_learning_service_passes_recent_session_context_to_prompt tests.test_services.ServiceTests.test_learning_service_saves_user_and_assistant_messages -v`, `python -m unittest tests.test_tui.TUITests.test_tui_learning_mode_does_not_save_interview_answer tests.test_tui.TUITests.test_tui_composer_submits_multiline_code_block_to_learning tests.test_tui.TUITests.test_tui_learning_mode_persists_dialog_through_service -v`.
+
+### Learning context continuity roadmap capture
+
+- Зафиксирован user feedback: в режиме обучения follow-up вопросы к локальной модели сейчас ощущаются как новый разговор, потому что сохраненный learning transcript виден в UI/history, но prompt generation должен явно получать bounded recent dialog context.
+- `ROADMAP.md` получил новый приоритетный блок `0D. User feedback: learning context continuity` перед always-on scheduler tasks: recent-turn prompt context, context budget guard, summary/compaction для длинных dialogs, regression tests и docs sync.
+- `CLAUDE.md` обновлен как project memory: `/learn` должен передавать последние turns текущего dialog session/topic без утечки между темами/сессиями, а при переполнении context window использовать rolling summary. `README.md` честно отмечает это как текущий roadmap gap, а не готовое поведение.
+
 ## 2026-06-02
 
 ### Scheduler TUI startup hook

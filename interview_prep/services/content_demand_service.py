@@ -229,6 +229,7 @@ class ContentDemandService:
             competency = gap.competency
             competency_id = competency.id or 0
             reason = f"readiness gap: {competency.slug}"
+            mapped_topic = self._topic_for_competency(competency)
             targets.extend(
                 [
                     self._competency_target(
@@ -238,6 +239,7 @@ class ContentDemandService:
                         current_count=len(accepted_by_competency.get(competency_id, set())),
                         reason=reason,
                         priority=10 + index,
+                        mapped_topic=mapped_topic,
                     ),
                     self._competency_target(
                         competency,
@@ -246,6 +248,7 @@ class ContentDemandService:
                         current_count=len(candidate_by_competency.get(competency_id, set())),
                         reason=reason,
                         priority=30 + index,
+                        mapped_topic=mapped_topic,
                     ),
                 ]
             )
@@ -295,9 +298,13 @@ class ContentDemandService:
         current_count: int,
         reason: str,
         priority: int,
+        mapped_topic: Topic | None = None,
     ) -> ContentDemandTarget:
         return ContentDemandTarget(
             kind=kind,
+            topic_id=mapped_topic.id if mapped_topic else None,
+            topic_slug=mapped_topic.slug if mapped_topic else None,
+            topic_title=mapped_topic.title if mapped_topic else None,
             competency_id=competency.id,
             competency_slug=competency.slug,
             competency_title=competency.title,
@@ -307,6 +314,13 @@ class ContentDemandService:
             priority=priority,
             upcoming_mode=CONTENT_DEMAND_MODE_PRACTICE,
         )
+
+    def _topic_for_competency(self, competency: Competency) -> Topic | None:
+        for topic_id in self.repository.list_topic_ids_for_competency(competency.slug):
+            topic = self.repository.get_topic(topic_id)
+            if topic is not None:
+                return topic
+        return None
 
 
 def normalize_content_demand_modes(upcoming_modes: Iterable[str] | None) -> tuple[str, ...]:

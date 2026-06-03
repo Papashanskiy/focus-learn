@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from interview_prep.domain.models import (
     QUESTION_SOURCE_QUALITY_PENDING_AUTO_REVIEW,
@@ -26,6 +26,49 @@ class QuestionSourceRefreshResult:
     snapshots: tuple[QuestionSourceSnapshot, ...]
     saved_count: int
     dry_run: bool
+
+
+@dataclass(frozen=True)
+class QuestionSourceStalenessItem:
+    source: QuestionSourceDefinition
+    latest_snapshot: QuestionSourceSnapshot | None
+    reason: str
+
+
+@dataclass(frozen=True)
+class QuestionSourceStalenessReport:
+    generated_at: datetime
+    max_age_days: int
+    items: tuple[QuestionSourceStalenessItem, ...]
+
+    @property
+    def stale_items(self) -> tuple[QuestionSourceStalenessItem, ...]:
+        return tuple(item for item in self.items if item.reason)
+
+    @property
+    def missing_count(self) -> int:
+        return sum(1 for item in self.stale_items if item.reason == "missing")
+
+    @property
+    def expired_count(self) -> int:
+        return sum(1 for item in self.stale_items if item.reason == "stale")
+
+    @property
+    def fresh_count(self) -> int:
+        return len(self.items) - len(self.stale_items)
+
+    @property
+    def needs_refresh(self) -> bool:
+        return bool(self.stale_items)
+
+    @property
+    def reason(self) -> str:
+        parts: list[str] = []
+        if self.missing_count:
+            parts.append(f"missing={self.missing_count}")
+        if self.expired_count:
+            parts.append(f"stale={self.expired_count}")
+        return "source refresh cadence" + (f" ({', '.join(parts)})" if parts else "")
 
 
 @dataclass(frozen=True)
@@ -298,6 +341,36 @@ SOURCE_BACKED_CANDIDATE_TEMPLATES: tuple[SourceBackedCandidateTemplate, ...] = (
 class QuestionSourceService:
     def __init__(self, repository: SQLiteRepository):
         self.repository = repository
+
+    def staleness_report(
+        self,
+        *,
+        max_age_days: int = 30,
+        now: datetime | None = None,
+    ) -> QuestionSourceStalenessReport:
+        if max_age_days < 1:
+            raise ValueError("max_age_days must be positive")
+        reference_now = (now or datetime.now()).replace(microsecond=0)
+        stale_before = reference_now - timedelta(days=max_age_days)
+        latest_by_source_id: dict[str, QuestionSourceSnapshot] = {}
+        for snapshot in self.repository.list_question_source_snapshots():
+            latest_by_source_id.setdefault(snapshot.source_id, snapshot)
+
+        items: list[QuestionSourceStalenessItem] = []
+        for source in WHITELISTED_QUESTION_SOURCES:
+            latest = latest_by_source_id.get(source.source_id)
+            if latest is None:
+                reason = "missing"
+            elif latest.retrieved_at < stale_before:
+                reason = "stale"
+            else:
+                reason = ""
+            items.append(QuestionSourceStalenessItem(source=source, latest_snapshot=latest, reason=reason))
+        return QuestionSourceStalenessReport(
+            generated_at=reference_now,
+            max_age_days=max_age_days,
+            items=tuple(items),
+        )
 
     def refresh(self, *, dry_run: bool = False, now: datetime | None = None) -> QuestionSourceRefreshResult:
         retrieved_at = (now or datetime.now()).replace(microsecond=0)

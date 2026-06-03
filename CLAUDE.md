@@ -14,6 +14,7 @@ LLM и фоновые процессы должны быть встроены в
 
 - приложение само предлагает, что учить дальше;
 - приложение само готовит недостающие вопросы, объяснения и system design scenarios;
+- learning mode должен сохранять conversational continuity: follow-up вопросы пользователя получают bounded recent dialog context, а длинные диалоги должны сжиматься в summary вместо тихого сброса истории;
 - пользователь видит понятные статусы, но не обязан управлять генерацией контента вручную;
 - fallback должен сохранять работоспособность без потери учебного flow.
 
@@ -29,7 +30,7 @@ MVP реализован:
 - Advanced TUI surfaces доступны через пункт `Advanced`, `/advanced` или `/commands`; slash-command fallbacks для `/content`, `/materials`, `/questions-review`, `/curation-audit`, `/history` и queue controls сохраняются для диагностики.
 - Read-only WSGI adapter skeleton для будущего web UI поверх `services.read`: `/api/smoke`, `/api/dashboard`, `/api/readiness`, `/api/competencies`, `/api/sessions/<id>`, `/api/notebook`, `/health`; TUI остается основным интерфейсом.
 - Нижний TUI input заменен на многострочный composer для ответов и slash commands; Enter отправляет текущий draft, Shift+Enter вставляет перенос строки внутри ответа, а длинный draft расширяет composer до capped scrollable области.
-- Учебный TUI-режим `/learn` для разъяснений с ИИ без сохранения текста как interview answer; последние учебные реплики сохраняются, восстанавливаются по теме и листаются командами `/learn-older`/`/learn-newer`.
+- Учебный TUI-режим `/learn` для разъяснений с ИИ без сохранения текста как interview answer; последние учебные реплики сохраняются, восстанавливаются по теме и листаются командами `/learn-older`/`/learn-newer`. Follow-up prompts получают bounded recent history текущего learning dialog session/topic, а длинные topic-bound диалоги получают rolling summary/compaction перед свежими turns.
 - TUI system design mode поддерживает `/sd-checkpoint`: короткую промежуточную проверку от интервьюера без создания final feedback artifact/evaluation, и `/sd-pressure`: targeted pressure follow-up по capacity, hot keys, retries, idempotency, migrations и abuse protection. Сохраненный final feedback и structured rubric scores доступны в TUI history через `/history system-design` и в CLI через `system-design-history`.
 - TUI имеет scrollable панели, command palette `/commands` и notes editor `/notes`; draft заметок сохраняется и восстанавливается через `manual_notes` по session/topic/global context, а `/note-from-answer` сохраняет gap из последнего AI feedback в notebook.
 - SQLite-схема и минимальный русскоязычный bootstrap/fallback стартовых тем и вопросов.
@@ -79,6 +80,7 @@ MVP реализован:
 - Пользовательский flow ведется на русском; AI prompts и fallback тоже должны отвечать на русском.
 - Самооценка убрана из старой CLI-сессии, но используется в TUI и сохраняется в `self_score`.
 - `/learn` должен оставаться учебным режимом: не оценивать пользователя и не писать учебные вопросы в таблицу `answers`.
+- `/learn` не должен начинать уточняющие вопросы "с чистого листа": при генерации ответа сервис передает в LLM prompt последние turns текущего dialog session/topic в пределах message/character budget и не смешивает историю разных тем/сессий. Для длинных topic-bound диалогов используется rolling summary/compaction, чтобы локальная модель с ограниченным context window сохраняла смысл старой части разговора.
 - При изменении TUI приоритет у focused workflow: в каждом режиме основной экран должен показывать то, чем пользователь сейчас занимается.
 - Default minimal mode не должен снова рекламировать service/debug commands на первом экране; новые secondary surfaces добавлять через Advanced/menu/slash fallback, если они не являются основным учебным действием.
 - Notes editor сохраняет и восстанавливает один draft на session/topic/global context через `manual_notes`; именованные ручные заметки из `/save-note` и feedback gaps из `/note-from-answer` показываются в `/notebook`, а internal draft rows там скрыты.
